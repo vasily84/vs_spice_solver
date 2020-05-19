@@ -5,7 +5,7 @@
 # составная часть проекта vs_circuit_solver
 # тесты решателя для различный условий
 #
-# автор В.Симонов, 17-мая-2020
+# автор В.Симонов, 18-мая-2020
 # vasily_simonov@mail.ru, github.com/vasily84
 #
 # license : это модуль в любом виде можно использовать в любых целях. 
@@ -13,21 +13,28 @@
 #
 
 from vs_circuit_solver import set_circuit_template,\
-    init_target_by_circuitFile,generate_circuitFile_by_values,\
-    run_fitter,analysis_plot
+    init_target_by_circuitFile, init_target_from_csvFile, \
+    generate_circuitFile_by_values,run_fitter,analysis_plot,\
+    set_circuit_nominals_and_mask
     
 import vs_solver_settings as G
 
-X_dst = [1e2, 1e3]
+# значения R1,R2
+test_A_R1R2 = [1e2, 1e3]
 
 
-# выполнить тесты для схемы test_A.cir_t
 def test_all():
-    #return 
+    test_A_all()
+    
+# выполнить тесты для схемы test_A.cir_t
+def test_A_all():
     # секретный метод индийских ученых для запуска тестов
     set_circuit_template('test_A.cir_t')
+    set_circuit_nominals_and_mask([1e2,1e2], [True,True] )
     test_A1() 
     G.restore_INIT_param()
+    #return 
+
     test_A2()
     G.restore_INIT_param()
     test_A3()
@@ -45,14 +52,16 @@ def test_all():
     test_A9()
     G.restore_INIT_param()
     test_A10()
-
-
+    
+    
 # тест - автоподбор кривой варьированием R1,R2 для Rcs = 4700
 def test_A1():
     print('begin of test A1')
     G.INIT_Rcs = 4700
-    generate_circuitFile_by_values(X_dst)
-    init_target_by_circuitFile()
+    generate_circuitFile_by_values(test_A_R1R2)
+    init_target_from_csvFile('test_A1_result.csv')
+   
+    #init_target_by_circuitFile()
     
     if run_fitter(result_cir_file_name='test_A1_result.cir',result_csv_file_name='test_A1_result.csv'):
         analysis_plot(title='test_A1 Rcs=4700',pngName='test_A1_result.png')
@@ -66,7 +75,7 @@ def test_A1():
 def test_A2():
     print('begin of test A2')
     G.INIT_Rcs = 470
-    generate_circuitFile_by_values(X_dst)
+    generate_circuitFile_by_values(test_A_R1R2)
     init_target_by_circuitFile()
     
     if run_fitter(result_cir_file_name='test_A2_result.cir',result_csv_file_name='test_A2_result.csv'):
@@ -81,7 +90,7 @@ def test_A2():
 def test_A3():
     print('begin of test A3')
     G.INIT_Rcs = 47
-    generate_circuitFile_by_values(X_dst)
+    generate_circuitFile_by_values(test_A_R1R2)
     init_target_by_circuitFile()
     
     if run_fitter(result_cir_file_name='test_A3_result.cir',result_csv_file_name='test_A3_result.csv'):
@@ -96,7 +105,7 @@ def test_A3():
 def test_A4():
     print('begin of test A4')
     G.INIT_SNR = 20 # моделируем более шумное измерений
-    generate_circuitFile_by_values(X_dst)
+    generate_circuitFile_by_values(test_A_R1R2)
     init_target_by_circuitFile()
     
     G.INIT_SNR = 40 # подбираем менее шумный сигнал
@@ -112,7 +121,7 @@ def test_A4():
 def test_A5():
     print('begin of test A5')
     G.INIT_SNR = 20 # моделируем более шумное измерений
-    generate_circuitFile_by_values(X_dst)
+    generate_circuitFile_by_values(test_A_R1R2)
     init_target_by_circuitFile()
     
     G.INIT_SNR = 20 # подбираем менее шумный сигнал
@@ -133,7 +142,7 @@ def test_A6():
     print('begin of test A6')
     G.MAX_NUM_POINTS = 10000
     
-    generate_circuitFile_by_values(X_dst)
+    generate_circuitFile_by_values(test_A_R1R2)
     init_target_by_circuitFile()
     
     if run_fitter(result_cir_file_name='test_A6_result.cir',result_csv_file_name='test_A6_result.csv'):
@@ -152,7 +161,7 @@ def test_A7():
     
     print('begin of test A7')
     G.MAX_NUM_POINTS = 10
-    generate_circuitFile_by_values(X_dst)
+    generate_circuitFile_by_values(test_A_R1R2)
     init_target_by_circuitFile()
     
     if run_fitter(result_cir_file_name='test_A7_result.cir',result_csv_file_name='test_A7_result.csv'):
@@ -167,7 +176,7 @@ def test_A7():
 def test_A8():
     print('begin of test A8')  
     G.INIT_V = 3
-    generate_circuitFile_by_values(X_dst)
+    generate_circuitFile_by_values(test_A_R1R2)
     init_target_by_circuitFile()
     G.INIT_V = 3.3
     if run_fitter(result_cir_file_name='test_A8_result.cir',result_csv_file_name='test_A8_result.csv'):
@@ -182,7 +191,7 @@ def test_A8():
 def test_A9():
     print('begin of test A9')
     G.INIT_Rcs = 4700
-    generate_circuitFile_by_values(X_dst)
+    generate_circuitFile_by_values(test_A_R1R2)
     init_target_by_circuitFile()
     
     G.INIT_Rcs = 3300
@@ -199,7 +208,7 @@ def test_A10():
     print('begin of test A10')
     G.INIT_Rcs = 4700
     G.INIT_V = 3
-    generate_circuitFile_by_values(X_dst)
+    generate_circuitFile_by_values(test_A_R1R2)
     init_target_by_circuitFile()
     
     G.INIT_Rcs = 2.*4700
