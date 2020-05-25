@@ -7,7 +7,7 @@
 # поставляется без всякой оптимизации, ибо имеет целью установление методики 
 # расчета таких вещей и определения границ применимости этой методики
 #
-# автор В.Симонов, 21-мая-2020
+# автор В.Симонов, 18-мая-2020
 # vasily_simonov@mail.ru, github.com/vasily84
 #
 # license : это модуль в любом виде можно использовать в любых целях. 
@@ -42,6 +42,8 @@ analysis = None
 # целевая кривая с током. Та, которую мы подбираем.
 target_VCurrent = None
 target_input_dummy = None
+# заряд, ушедщий в схему.
+target_Q = None
 
 # целевая кривая с током для сравнения в библиотеке libivcmp
 target_IVCurve = None
@@ -71,7 +73,6 @@ Xi_mask = [False,False,False,False, False,False,False, False,False,False,False]
 
 #### ФУНКЦИИ ДЛЯ ШАБЛОНА, ЦЕЛЕВОЙ МОДЕЛИ И МАСКИ ПАРАМЕТРОВ ##################
 def Xi_unroll(x_short):
-    global Xi_long
     XL = Xi_long
     
     j = 0
@@ -82,11 +83,26 @@ def Xi_unroll(x_short):
             
     return XL
 
+def Xi_pack():
+    xi = []
+       
+    for i in range(0,len(Xi_mask)):
+        if Xi_mask[i]:
+            xi += [Xi_long[i]]
+                       
+    return xi
+    
+
 
 # установить все известные номиналы и маску оптимизации
 def set_circuit_nominals_and_mask(nominals,mask):
     global Xi_long,Xi_mask
+    # print('set_circuit_nominals_and_mask')
+    # print('nominals = '+str(nominals))
+    # print('mask = '+str(mask))
     Xi_long = nominals
+    # print('Xi_long')
+    # print(Xi_long)
     Xi_mask = mask
     
     
@@ -104,15 +120,21 @@ def set_circuit_template(fileName):
     
 # инициализировать целевую модель, промоделироваа файл схемы
 def init_target_by_circuitFile(fileName = circuit_SessionFileName):
-    global target_VCurrent, target_input_dummy, target_IVCurve
+    global target_VCurrent, target_input_dummy, target_IVCurve,target_Q
     process_circuitFile(fileName)
     target_VCurrent = analysis.VCurrent
     target_input_dummy = analysis.input_dummy
     
     if G.USE_LIBIVCMP:
         target_IVCurve = analysis_to_IVCurve()
-       
         
+    target_Q = np.zeros_like(target_VCurrent)
+    Q = 0.
+    for i in range(0,len(target_VCurrent)):
+        Q += target_VCurrent[i]
+        target_Q[i] = Q
+        
+           
 # инициализировать целевую модель данными из csv файла, с заданной частотой,
 # амплитудой, и токоограничивающим резистором
 def init_target_from_csvFile(fileName, F=G.INIT_F, V=G.INIT_V, Rcs=G.INIT_Rcs):
@@ -125,11 +147,17 @@ def init_target_from_csvFile(fileName, F=G.INIT_F, V=G.INIT_V, Rcs=G.INIT_Rcs):
             # todo непонятно, почему читает пустые нечетные строки, выяснить
             if i==0:
                 target_input_dummy = np.array(row,dtype=float)
-                print(target_input_dummy)
+                #print(target_input_dummy)
             if i==2:
                 target_VCurrent = np.array(row,dtype=float) 
-                print(target_VCurrent)
+                #print(target_VCurrent)
             i += 1
+            
+    target_Q = np.zeros_like(target_VCurrent)
+    Q = 0.
+    for i in range(0,len(target_VCurrent)):
+        Q += target_VCurrent[i]
+        target_Q[i] = Q
     # 
     G.INIT_F = F
     G.INIT_V = V
@@ -165,8 +193,11 @@ def generate_circuitFile_by_values( Xi_values, fileCircuit = circuit_SessionFile
 # промоделировать файл схемы
 def process_circuitFile(fileName=circuit_SessionFileName,csvName=''):
     global analysis
+    del(analysis)
+    
     circuit = spice.LoadFile(fileName)
     input_data = spice.Init_Data(G.INIT_F, G.INIT_V, G.INIT_Rcs,G.INIT_SNR )
+    #analysis = spice.CreateCVC1(circuit, input_data, G.MAX_NUM_POINTS, "input", G.INIT_CYCLE)
     analysis = spice.CreateCVC1(circuit, input_data, G.MAX_NUM_POINTS, "input", G.INIT_CYCLE)
     if(not csvName==''):
         spice.SaveFile(analysis, csvName)
@@ -185,11 +216,19 @@ def analysis_to_IVCurve():
     
 # вывести на график результат моделирования
 def analysis_plot(title='',pngName=''):
+    return
     figure1 = plt.figure(1, (20, 10))
     plt.grid()
+    
+    # первый шаг итерации подбора ВАХ
+    # if not firstStep_input_dummy is None:
+    #     plt.plot(firstStep_input_dummy, firstStep_VCurrent,color='yellow')   
+    # целевая ВАХ
+    #if not target_input_dummy is None:
     plt.plot(target_input_dummy, target_VCurrent,color='red')
+    # ВАХ результат подбора
+    #if not analysis is None:
     plt.plot(analysis.input_dummy, analysis.VCurrent,color='blue')  
-    #plt.plot(firstStep_input_dummy, firstStep_VCurrent,color='yellow')
         
     if (not title==''):
        plt.title(title)       
@@ -199,28 +238,70 @@ def analysis_plot(title='',pngName=''):
         plt.savefig(pngName)
         
     plt.show()
+    
+def analysis_to_Q():
+    Q = 0.
+    Q_curve = np.zeros_like(analysis.input_dummy)
+    for i in range(0,len(analysis.input_dummy)):              
+        Q += analysis.VCurrent[i]                
+        Q_curve[i] = Q 
+        
+    return Q_curve
+    
+
+# вывести на график результат моделирования
+def analysis_plotQ():
+    #return 
+    figure1 = plt.figure(1, (20, 10))
+    plt.grid()
+    Q = analysis_to_Q()
+
+    # целевая ВАХ
+    plt.plot(target_VCurrent, color='red')
+    plt.plot(analysis.VCurrent,color='blue')
+    plt.plot(analysis.VCurrent-target_VCurrent,color='black')
+              
+    plt.show()
                            
 
 #### ФУНКЦИИ СРАВНЕНИЯ ВАХ ###################################################
     
+# вычислить несовпадение последнего анализа и целевой функции.
+def analysis_misfit_by_Q():
+    # разница зарядов
+    sko = 0.
+    Q = analysis_to_Q()
+    for i in range(0,len(target_Q)):
+       dQ = target_Q[i]-Q[i]
+       sko += np.abs(dQ)
+        
+    return sko
+     
+ 
+def analysis_misfit_by_sko():  
+    return analysis_misfit_by_Q()
+    # разница токов
+    Isub = target_VCurrent-analysis.VCurrent
+    ssum = 0.
+    # todo - переделать на библиотечный вызов
+    for i in range(0,len(analysis.input_dummy)-1):
+        # изменение напряжения
+        dV = analysis.input_dummy[i+1]-analysis.input_dummy[i] 
+        # средний ток
+        I = (Isub[i+1]+Isub[i])/2. 
+        ssum += np.abs(I*dV)
+              
+    return ssum
+
+
 # вычислить несовпадение последнего анализа и целевой функции. 
-# возвращает неотрицательное число    
-def analysis_misfit_by_sko():   
-    s = target_VCurrent-analysis.VCurrent    
+def analysis_misfit_by_sko_old():  
+    # так сравниваем мощности в точках
+    s = (target_VCurrent-analysis.VCurrent)*analysis.input_dummy    
+    #s = target_VCurrent*target_input_dummy-analysis.VCurrent*analysis.input_dummy    
     #s2 = s*s # работает наилучшим образом
     s2 = np.abs(s) 
     s_sum = np.sum(s2)
-    return s_sum
-
-# специальная метрика - чем дальше от нуля, тем больший вес имеет
-def analysis_misfit_by_sko_v2():   
-    s = target_VCurrent-analysis.VCurrent    
-    s2 = s*s 
-    s_sum = 0.
-    for i in range(0,len(analysis.input_dummy)):
-        if np.abs(analysis.VCurrent[i])>=G.DIODE_VOLTAGE:
-            s_sum += s2[i]
-    
     return s_sum
 
 
@@ -272,47 +353,151 @@ def analysis_misfit_by_negativeVoltage():
 
        
 #### ФУНКЦИИ РЕШАТЕЛЯ ########################################################
+# вектор, обеспечивающий минимум оптимизируемой функции
+Xi_result = [0.,0.,0.,0., 0.,0.,0., 0.,0.,0.,0.] 
+# текущий найденный минимум оптимизируемой функции 
+misfit_result = 0.
+# счетчик числа вызовов функции оптимизатором
+FitterCount = 0
 
-# счетчик числа вызова функции оптимизатором
-ffCount = 0
-# функция вызывается оптимизатором
-def fitter_subroutine(Xargs):
-    global ffCount  
-    generate_circuitFile_by_values(Xi_unroll(Xargs))
-    process_circuitFile()
-    ffCount += 1
-    m = analysis_misfit()
-    #print('fitter_subroutine Count = '+str(ffCount))
+# начать работать с решателем - сбросить счетчики, вывести инфо
+def init_fitter():
+    global FitterCount,analysis_misfit_best
+    FitterCount = 0
+    #print('\ninit_fitter : ')
     
-    return m
 
+# завершить работу с решателем - вывести инфо
+def report_fitter():
+    # print('\nreport_fitter : ')
+    # print('FitterCount = '+str(FitterCount))
+    # print('Xi_result = '+str(Xi_result))
+    # print('misfit = '+str(misfit_result))
+    pass
+    
+
+# функция вызывается оптимизатором
+def fitter_subroutine_sqleast(Xargs):
+    global FitterCount,misfit_result,Xi_result,firstStep_VCurrent,firstStep_input_dummy  
+    Xargs =1000.*Xargs # всё в килоомах
+    xi = Xi_unroll(Xargs)
+    #print('xi='+str(xi))
+    generate_circuitFile_by_values(xi)
+    process_circuitFile()
+    
+    res = target_Q
+    Q = analysis_to_Q()
+    A = target_VCurrent#*target_input_dummy
+    B = analysis.VCurrent#*analysis.input_dummy
+    
+    # for i in range(1,len(target_input_dummy)):
+    #     A = target_VCurrent[i]*(target_input_dummy[i]-target_input_dummy[i-1])
+    #     B = analysis.VCurrent[i]*(analysis.input_dummy[i]-analysis.input_dummy[i-1])
+    
+    
+    FitterCount += 1
+    R = (B-A)/G.MAX_NUM_POINTS
+    #R = Q-res
+    return (R) # возвращаем вектор разностей значений заряда
+
+
+# функция вызывается оптимизатором
+def fitter_subroutine_minimize(Xargs):
+    global FitterCount,misfit_result,Xi_result,firstStep_VCurrent,firstStep_input_dummy  
+    xi = Xi_unroll(Xargs)
+    generate_circuitFile_by_values(xi)
+    process_circuitFile()
+    
+    M = analysis_misfit()
+    if G.USE_LIBIVCMP:
+        Minv = analysis_misfit_by_libivcmp()
+    else:
+        Minv = analysis_misfit_by_sko() 
+        
+    FitterCount += 1
+    #print('FitterCount = '+str(FitterCount))
+    
+    # первый вызов этой функции
+    if FitterCount==1:  
+        Xi_result = xi
+        misfit_result = Minv       
+        firstStep_VCurrent = np.copy(analysis.VCurrent)
+        firstStep_input_dummy = np.copy(analysis.input_dummy)
+        return M
+    
+    # нашли минимум, лучший чем предыдущие, запоминаем его
+    if Minv<misfit_result:      
+        Xi_result = xi
+        misfit_result = Minv
+        
+    return M
+
+def run_fitter(result_cir_file_name='',result_csv_file_name=''):       
+    return run_fitter_sqleast(result_cir_file_name='',result_csv_file_name='')          
 
 # запустить автоподбор         
-def run_fitter(result_cir_file_name='',result_csv_file_name='',Xargs = Xi_long):
-    global ffCount, firstStep_VCurrent, firstStep_input_dummy
-    ffCount = 0
-      
+def run_fitter_sqleast(result_cir_file_name='',result_csv_file_name=''):    
+    global Xi_result,FitterCount             
+    print('\nrun_fitter\nXinit = ')
+    Xargs = Xi_pack()
+    # print('Xargs='+str(Xargs))
+    # print(Xargs)
+    # print('Xi_mask = ')
+    # print(Xi_mask)
+    FitterCount = 0
+    Xargs[0] = 1e-3*Xargs[0]
+    Xargs[1] = 1e-3*Xargs[1]
+    Xargs[2] = 1e-3*Xargs[2]
     
-    fitter_subroutine(Xargs)
-    firstStep_VCurrent = analysis.VCurrent
-    firstStep_input_dummy = analysis.input_dummy
+    #x_scale = np.array([1e-3,1e-3,1e-3])
+    x_dif = np.array([5e-2,5e-2,5e-2])
+    bnds = np.array(([-1e2,-1e2,-1e2],[1e8,1e8,1e8]))
+    #resX = spo.least_squares(fitter_subroutine_sqleast,Xargs,method='lm',xtol=1e-15)
+    resX = spo.least_squares(fitter_subroutine_sqleast,Xargs,bounds=bnds,xtol=None,ftol=None,gtol=1e-5,loss='soft_l1',diff_step=x_dif,max_nfev=1000)
+    #print(resX)
+    print(resX.message)
+    x = resX.x
+    #x = x*0.5
+    #resX = spo.least_squares(fitter_subroutine_sqleast,x,bounds=bnds,xtol=None,ftol=None,gtol=1e-5,loss='soft_l1',diff_step=x_dif,max_nfev=1000)
     
-    resX = spo.minimize(fitter_subroutine,Xargs,method=G.FITTER_METHOD,tol=G.TOLERANCE,options={'maxiter':100})
+    X =1000.*resX.x
+    Xi_result = Xi_unroll(X)
+    #print('resX.x='+str(resX.x))
+    print('FitterCount='+str(FitterCount))
+    # вызываем с результатом оптимизации, ибо предыдущий вызов может быть неоптимальным
+    generate_circuitFile_by_values(Xi_result)
+    process_circuitFile()
+    #report_fitter()
+              
+    if(not result_csv_file_name==''):
+        spice.SaveFile(analysis, result_csv_file_name)
+    if(not result_cir_file_name==''):          
+        generate_circuitFile_by_values(resX.x,result_cir_file_name)
+    
+    return True
+
+# запустить автоподбор         
+def run_fitter_minimize(result_cir_file_name='',result_csv_file_name=''):                 
+    print('\nrun_fitter\nXinit = ')
+    Xargs = Xi_pack()
+    print(Xargs)
+    print('Xi_mask = ')
+    print(Xi_mask)
+    
+    resX = spo.minimize(fitter_subroutine_minimize,Xargs,method=G.FITTER_METHOD,tol=G.TOLERANCE,options={'maxiter':100})
+    #print(resX.message)
     
     # вызываем с результатом оптимизации, ибо предыдущий вызов может быть неоптимальным
-    fitter_subroutine(resX.x) 
+    generate_circuitFile_by_values(Xi_result)
+    process_circuitFile()
+    report_fitter()
+              
+    if(not result_csv_file_name==''):
+        spice.SaveFile(analysis, result_csv_file_name)
+    if(not result_cir_file_name==''):          
+        generate_circuitFile_by_values(resX.x,result_cir_file_name)
     
-    print(resX.message)
-    #print('Rtarg = '+str(get_target_positiveVoltage_Resistance()))
-    #print('Rtarg_via_diode = '+str(get_target_positiveVoltage_Resistance_via_Diode()))
-    
-    if resX.success:
-        if(not result_csv_file_name==''):
-            spice.SaveFile(analysis, result_csv_file_name)
-        if(not result_cir_file_name==''):          
-            generate_circuitFile_by_values(resX.x,result_cir_file_name,)
-    
-    return resX
+    return True
     
 
 
@@ -371,21 +556,32 @@ class CGeneralCircuit():
         s3 = ' R3='+str(self.R3)+' C3='+str(self.C3)+' R_C3='+str(self.R_C3)+' R_D3='+str(self.R_D3)
         return (s1+s2+s3)
     
-    # установить для моделирования 
+    # установить номиналы в вектор для оптимизации 
     def setup(self):
-        set_circuit_template('general.cir_t')       
+        set_circuit_template('general.cir_t')                   
         set_circuit_nominals_and_mask(self.get_Xi(),self.vmask)
        
+    def load_result(self):
+        # print('\nload_result:')
+        # print(Xi_result)
+        if self.vmask[0]: self.R1 = Xi_result[0]
+        if self.vmask[1]: self.C1 = Xi_result[1]
+        if self.vmask[2]: self.R_C1 = Xi_result[2]
+        if self.vmask[3]: self.R_D1 = Xi_result[3]
         
+        if self.vmask[4]: self.R2 = Xi_result[4]
+        if self.vmask[5]: self.C2 = Xi_result[5]
+        if self.vmask[6]: self.R_C2 = Xi_result[6]
         
+        if self.vmask[7]: self.R3 = Xi_result[7]
+        if self.vmask[8]: self.C3 = Xi_result[8]
+        if self.vmask[9]: self.R_C3 = Xi_result[9]
+        if self.vmask[10]: self.R_D3 = Xi_result[10]
+        
+       
     def reset_vmask(self):
         self.vmask = [False,False,False,False, False,False,False, False,False,False,False]
         
-    # # установить случайны номиналы
-    # def randomize_all_resistors(self):
-    #     self.R1 = 1e6*random.random()
-    #     self.R2 = 1e6*random.random()
-    #     self.R3 = 1e6*random.random()
         
     # сформировать вектор из значений.
     def get_Xi(self):
@@ -407,9 +603,10 @@ class CGeneralCircuit():
         return xi
     
     def init_target_random(self):
-        self.R1 = 1e3*random.random()        
-        self.R2 = 1e3*(1+random.random())            
-        self.R3 = 2e3*random.random()
+        self.reset_values()
+        self.R1 = 1e-5      
+        #self.R2 = 1e3*(random.random())            
+        self.R3 = 1.
             
         self.setup()        
         f = 'target1.cir'
@@ -419,122 +616,184 @@ class CGeneralCircuit():
         
     def init_target1(self):
         self.reset_values()
-        self.R1 = 1e3                                   
+        #self.R1 = 100 
+        #self.C1 = 1e-6
+        #self.R_C1 = G.NULL_R
+        
+        #self.R3 = 100 
+        #self.C3 = 1e-6
+        #self.R_C3 = G.NULL_R
+                   
+        self.R2 = 3000
         self.setup()
         
-        f = 'target1.cir'
-        generate_circuitFile_by_values(self.get_Xi(), f)
-        init_target_by_circuitFile(f)
+        generate_circuitFile_by_values(self.get_Xi())
+        init_target_by_circuitFile()
     
     def init_target2(self):
-        self.reset_values()        
-        self.R3 = 1e4                                       
+        self.reset_values()    
+        self.R1 = 2.
+        self.R3 = 1000   
+        #self.R_C3 = G.HUGE_R       
+        #self.C3= 1e-7     
+        self.R2 = 400                             
         self.setup()
         
-        f = 'target2.cir'
-        generate_circuitFile_by_values(self.get_Xi(), f)
-        init_target_by_circuitFile(f)
+        generate_circuitFile_by_values(self.get_Xi())
+        init_target_by_circuitFile()
     
     def init_target3(self):
         self.reset_values()  
-        self.R1 = 100                
-        self.R2 = 100                                             
+        self.R1 = 1.       
+        self.R2 = 100
+        #self.R_C2 = G.HUGE_R
+        #self.C2 = 1e-6
+        self.R3 = 1200
+        #self.C2 = 1e-6  
+        #self.R_C2 = G.HUGE_R                                     
         self.setup()
         
-        f = 'target3.cir'
-        generate_circuitFile_by_values(self.get_Xi(), f)
-        init_target_by_circuitFile(f)
+        generate_circuitFile_by_values(self.get_Xi())
+        init_target_by_circuitFile()
         
         
     # определить сопротивление на положительной полуволне
-    def get_target_positiveVoltage_Resistance(self):
-        Isumm = 0.
-        Vsumm = 0.
+    def get_target_positiveVoltage_Resistance(self):       
+        Rsumm =0.
+        Rcount = 0
         
         for i in range(0,len(target_input_dummy)):
-            if target_input_dummy[i]>0.:
-                Isumm += target_VCurrent[i]
-                Vsumm += target_input_dummy[i]      
+            if target_input_dummy[i]>G.SMALL_VOLTAGE:
+                I= target_VCurrent[i]
+                V= target_input_dummy[i]      
+                try:
+                    R = np.abs(V/I)
+                except ArithmeticError:
+                    R = G.HUGE_R
+                Rsumm += R
+                Rcount += 1
+                
         try:
-            R = Vsumm/Isumm
+            R = Rsumm/Rcount
         except ArithmeticError:
             R = G.HUGE_R
             
-        return R 
+        return R
     
     # определить сопротивление на отрицательной полуволне
     def get_target_negativeVoltage_Resistance(self):
-        Isumm = 0.
-        Vsumm = 0.
+        Rsumm =0.
+        Rcount = 0
         
         for i in range(0,len(target_input_dummy)):
-            if target_input_dummy[i]<0.:
-                Isumm += target_VCurrent[i]
-                Vsumm += target_input_dummy[i]      
+            if target_input_dummy[i]<-1.*G.SMALL_VOLTAGE:
+                I= target_VCurrent[i]
+                V= target_input_dummy[i]      
+                try:
+                    R = np.abs(V/I)
+                except ArithmeticError:
+                    R = G.HUGE_R
+                Rsumm += R
+                Rcount += 1
+                
         try:
-            R = np.abs(Vsumm/Isumm)
+            R = Rsumm/Rcount
         except ArithmeticError:
             R = G.HUGE_R
             
-        return R 
+        return R
 
 
     # определить сопротивление на положительной полуволне, как если бы она была
     # включена через диод. Возвращает положительные и отрицательные значения
     def get_target_positiveVoltage_Resistance_via_Diode(self):
-        Isumm = 0.
-        Vsumm = 0.
-       
+        Rsumm =0.
+        Rcount = 0
+        
         for i in range(0,len(target_input_dummy)):
             if target_input_dummy[i]>G.DIODE_VOLTAGE:
-                Isumm += target_VCurrent[i]
-                Vsumm += (target_input_dummy[i]-G.DIODE_VOLTAGE)          
+                I= target_VCurrent[i]
+                V= target_input_dummy[i]-G.DIODE_VOLTAGE      
+                try:
+                    R = np.abs(V/I)
+                except ArithmeticError:
+                    R = G.HUGE_R
+                Rsumm += R
+                Rcount += 1
+                
         try:
-            R = Vsumm/Isumm
+            R = Rsumm/Rcount
         except ArithmeticError:
             R = G.HUGE_R
             
-        return R 
+        return R
     
     # определить сопротивление на отрицательной полуволне, как если бы она была
     # включена через диод. Возвращает положительные и отрицательные значения
     def get_target_negativeVoltage_Resistance_via_Diode(self):
-        Isumm = 0.
-        Vsumm = 0.
-       
+        Rsumm =0.
+        Rcount = 0
+        
         for i in range(0,len(target_input_dummy)):
             if target_input_dummy[i]<-1.*G.DIODE_VOLTAGE:
-                Isumm += target_VCurrent[i]
-                Vsumm += (target_input_dummy[i]+G.DIODE_VOLTAGE) # знак +, ибо само напряжение отрицательное         
+                I= target_VCurrent[i]
+                V= target_input_dummy[i]+G.DIODE_VOLTAGE      
+                try:
+                    R = np.abs(V/I)
+                except ArithmeticError:
+                    R = G.HUGE_R
+                Rsumm += R
+                Rcount += 1
+                
         try:
-            R = np.abs(Vsumm/Isumm)
+            R = Rsumm/Rcount
         except ArithmeticError:
             R = G.HUGE_R
             
-        return R 
+        return R
     
-    # 
+    # определить сопротивление в окрестности нуля
     def get_target_smallVoltage_Resistance(self):
-        Isumm = 0.
-        Vsumm = 0.
-       
+        Rsumm =0.
+        Rcount = 0
+        
         for i in range(0,len(target_input_dummy)):
-            if np.abs(target_input_dummy[i])<G.SMALL_VOLTAGE:
-                Isumm += np.abs(target_VCurrent[i])
-                Vsumm += np.abs(target_input_dummy[i])         
+            v = np.abs(target_input_dummy[i])
+            if v>=G.SMALL_VOLTAGE and v<=G.DIODE_VOLTAGE:
+                I= target_VCurrent[i]
+                V= target_input_dummy[i]      
+                try:
+                    R = np.abs(V/I)
+                except ArithmeticError:
+                    R = G.HUGE_R
+                Rsumm += R
+                Rcount += 1
+                
         try:
-            R = Vsumm/Isumm
+            R = Rsumm/Rcount
         except ArithmeticError:
             R = G.HUGE_R
             
-        return R 
+        return R
     
-    #
+    # определить сопротивление по всему диапазону напряжений
     def get_target_total_Resistance(self):
-        Isumm = np.sum(np.abs(target_VCurrent))
-        Vsumm = np.sum(np.abs(target_input_dummy))         
+        Rsumm =0.
+        Rcount = 0
+        
+        for i in range(0,len(target_input_dummy)):
+            if np.abs(target_input_dummy[i])>G.SMALL_VOLTAGE:
+                I= target_VCurrent[i]
+                V= target_input_dummy[i]      
+                try:
+                    R = np.abs(V/I)
+                except ArithmeticError:
+                    R = G.HUGE_R
+                Rsumm += R
+                Rcount += 1
+                
         try:
-            R = Vsumm/Isumm
+            R = Rsumm/Rcount
         except ArithmeticError:
             R = G.HUGE_R
             
@@ -542,49 +801,55 @@ class CGeneralCircuit():
     
     
     # найти стартовые значения для оптимизации и определить присутствие цепи 1,2,3
-    def find_initial_value_and_detect_nodes(self):
+    def find_initial_resistors_and_detect_nodes(self):
+        self.reset_vmask()
         r_plus = self.get_target_positiveVoltage_Resistance()
         r_plus_via_diode = self.get_target_positiveVoltage_Resistance_via_Diode()
         r_minus = self.get_target_negativeVoltage_Resistance()
         r_minus_via_diode = self.get_target_negativeVoltage_Resistance_via_Diode()
+        r_small = self.get_target_smallVoltage_Resistance()
         print('\nmeasured values: \n')
         print('r+ = '+str(r_plus))
         print('r- = '+str(r_minus))
         print('r+_diode = '+str(r_plus_via_diode))
-        print('r-_diode = '+str(r_minus_via_diode))
-        r_small = self.get_target_smallVoltage_Resistance()
+        print('r-_diode = '+str(r_minus_via_diode))        
         print('r_small = '+str(r_small))
                                    
-        #sigma_2 = 1./r_small
-        sigma_total = 1./self.get_target_total_Resistance()        
+        #sigma_2 = 1./r_small # старый вариант         
         sigma_12 = 1./(r_plus_via_diode)
         sigma_23 = 1./(r_minus_via_diode)
+        sigma_total = 1./self.get_target_total_Resistance()  
         sigma_2 = sigma_total-sigma_12-sigma_23
-        r_2 = 1./sigma_2
-        
+                
         print('initial values:\n')
         # ветки 1 и 2 отсутствуют
-        if (r_plus>=G.LARGE_R)or(r_plus>10.*r_minus):
+        if (r_plus>=G.LARGE_R):
             self.node_1 = False
             self.node_2 = False
             self.R3 = r_minus_via_diode
+            self.vmask[7] = True
             self.setup()
             print('only node_3, r3 = '+str(self.R3))
             return
             
         # ветки 2 и 3 отсутствуют
-        if (r_minus>=G.LARGE_R)or(r_minus>10.*r_plus):
+        if (r_minus>=G.LARGE_R):
             self.node_3 = False
             self.node_2 = False
             self.R1 = r_plus_via_diode
+            self.vmask[0] = True
             print('only node_1, r1 = '+str(self.R1))
             self.setup()
             return
         
-         # присутствуют все ветки, тяжелый случай.
-        self.R3 = 1./(sigma_12-sigma_2)
-        self.R2 = r_small
-        self.R1 = 1./(sigma_23-sigma_2)
+        # присутствуют все ветки, тяжелый вычислительный случай.
+        self.R3 = 1.#1./(sigma_12-sigma_2)
+        self.R2 = 1.#r_small
+        self.R1 = 1.#1./(sigma_23-sigma_2)
+        self.vmask[0] = True
+        self.vmask[4] = True
+        self.vmask[7] = True
+        
         print('r1='+str(self.R1)+', r2='+str(self.R2)+', r3='+str(self.R3))
         self.setup()
         
@@ -592,7 +857,7 @@ class CGeneralCircuit():
         
     # запустить подбор значений R1,R2, используется только 
     # положительная полуволна напряжения
-    def run_fitter_node12(self):
+    def run_fitter_r1r2(self):
         global analysis_misfit 
                    
         self.reset_vmask()
@@ -602,25 +867,14 @@ class CGeneralCircuit():
         analysis_misfit = analysis_misfit_by_positiveVoltage
         self.setup()
         
-        res = run_fitter()
-        
-        r1 = res.x[0]
-        r2 = res.x[1]
-        print('r1 = '+str(r1))
-        print('r2 = '+str(r2))
-        
-        if res.success: 
-            self.R1 = r1
-            self.R2 = r2
-            self.setup()    # сохраняем вектор с успешным подбором
-            
-        print(self)
-        analysis_plot(title='подбор R1,R2\n по положительной полуволне')
+        run_fitter()                        
+        self.load_result()    
+                    
         
         
     # запустить подбор значений R2,R3. используется только отрицательная 
     # полуволна напряжения 
-    def run_fitter_node23(self):
+    def run_fitter_r2r3(self):
         global analysis_misfit 
                     
         self.reset_vmask()
@@ -630,24 +884,13 @@ class CGeneralCircuit():
         analysis_misfit = analysis_misfit_by_negativeVoltage
         self.setup()
         
-        res = run_fitter()
+        run_fitter()
+        self.load_result()     
+               
         
-        r2 = np.abs(res.x[0])
-        r3 = np.abs(res.x[1])
-        print('r2 = '+str(r2))
-        print('r3 = '+str(r3))
-        
-        if res.success: 
-            self.R2 = r2
-            self.R3 = r3
-            self.setup()    # сохраняем вектор с успешным подбором
-            
-
-        print(self)
-        analysis_plot(title='подбор R2,R3\n по отрицательной полуволне')
         
     # запустить подбор значений R1,R2,R3
-    def run_fitter_node123(self):
+    def run_fitter_r1r2r3(self):
         global analysis_misfit 
             
         self.reset_vmask()
@@ -659,27 +902,12 @@ class CGeneralCircuit():
         
         self.setup()
         
-        res = run_fitter()
-        
-        r1 = np.abs(res.x[0])
-        r2 = np.abs(res.x[1])
-        r3 = np.abs(res.x[2])
-        print('r1 = '+str(r1))
-        print('r2 = '+str(r2))
-        print('r3 = '+str(r3))
-        
-        if res.success: 
-            self.R1 = r1
-            self.R2 = r2
-            self.R3 = r3
-            self.setup()    # сохраняем вектор с успешным подбором
+        run_fitter()
+        self.load_result()    
             
-
-        print(self)
-        analysis_plot(title='подбор R1,R2,R3')
         
     # запустить подбор значений R1
-    def run_fitter_node1(self):
+    def run_fitter_r1(self):
         global analysis_misfit 
             
         self.reset_vmask()
@@ -688,42 +916,26 @@ class CGeneralCircuit():
         analysis_misfit = analysis_misfit_by_positiveVoltage       
         self.setup()
         
-        res = run_fitter()       
-        r1 = np.abs(res.x[0])   
-        print('r1 = '+str(r1))
-       
+        run_fitter()  
+        self.load_result()    
         
-        if res.success: 
-            self.R1 = r1         
-            self.setup()    # сохраняем вектор с успешным подбором
-            
-
-        print(self)
-        analysis_plot(title='подбор R1')
         
         
     # запустить подбор значений R2
-    def run_fitter_node2(self):
+    def run_fitter_r2(self):
         global analysis_misfit 
             
         self.reset_vmask()
         self.vmask[4] = True # R2       
         restore_analysis_misfit_function()   
         self.setup()      
-        res = run_fitter()             
-        r2 = np.abs(res.x[0])           
-        print('r2 = '+str(r2))
-              
-        if res.success:      
-            self.R2 = r2           
-            self.setup()    # сохраняем вектор с успешным подбором
-            
-        print(self)
-        analysis_plot(title='подбор R2')
+        run_fitter()
+        self.load_result()                 
+        
     
         
     # запустить подбор значений R3
-    def run_fitter_node3(self):
+    def run_fitter_r3(self):
         global analysis_misfit 
             
         self.reset_vmask()        
@@ -732,18 +944,13 @@ class CGeneralCircuit():
         analysis_misfit = analysis_misfit_by_negativeVoltage
         self.setup()
         
-        res = run_fitter()
-        
-        r3 = np.abs(res.x[0])              
-        print('r3 = '+str(r3))
-        
-        if res.success:            
-            self.R3 = r3
-            self.setup()    # сохраняем вектор с успешным подбором
-            
+        run_fitter()
+        self.load_result()    
+       
+          
 
     # запустить подбор значений R1,R3
-    def run_fitter_node13(self):
+    def run_fitter_r1r3(self):
         global analysis_misfit 
             
         self.reset_vmask()
@@ -753,87 +960,105 @@ class CGeneralCircuit():
         analysis_misfit = analysis_misfit_by_sko
         self.setup()
         
-        res = run_fitter()
-        
-        r1 = np.abs(res.x[0])
-        r3 = np.abs(res.x[1])
-        print('r1 = '+str(r1))
-        print('r3 = '+str(r3))
-        
-        if res.success: 
-            self.R1 = r1
-            self.R3 = r3
-            self.setup()    # сохраняем вектор с успешным подбором
+        run_fitter()
+        self.load_result()   
+    
+    # запустить подбор значений для с2
+    def run_fitter_c2(self):
+        global analysis_misfit 
             
-
-        print(self)
-        analysis_plot(title='подбор R1,R3')
-    
-    
+        self.reset_vmask()
+        self.vmask[5] = True # C2
+        
+        analysis_misfit = analysis_misfit_by_sko
+        self.setup()
+        
+        run_fitter()
+        self.load_result()   
+        
+        
+    # сброс внутренних значений, обнуление для старта    
+    def reset_fitter(self):
+        self.reset_values()
+        self.vmask=[True,True,True,True, True,True,True, True,True,True,True]
+        self.setup()
+        
+    def analysis(self):
+        f = 'target3.cir'
+        generate_circuitFile_by_values(self.get_Xi(),f)
+        
     def run_fitter(self):
-        self.find_initial_value_and_detect_nodes()
-        #return 
-    
+        self.reset_fitter()
+        self.find_initial_resistors_and_detect_nodes()
+        init_fitter()
+        #G.INIT_SNR = 100.
         # рассматриваем частные случаи                  
         # только ветка 1
-        if self.node_1==True and self.node_2==False and self.node_3==False:
-            self.run_fitter_node1()
-            analysis_plot(title='РЕЗУЛЬТАТ')
-            return
+        # if self.node_1==True and self.node_2==False and self.node_3==False:
+        #     print('node_1 calculation:')
+        #     self.run_fitter_r1()
+        #     report_fitter()
+        #     analysis_plot(title='РЕЗУЛЬТАТ')            
+        #     return
         
         
-        # только ветка 3
-        if self.node_3==True and self.node_1==False and self.node_2==False:
-            self.run_fitter_node3()
-            analysis_plot(title='РЕЗУЛЬТАТ')           
-            return
+        # # только ветка 3
+        # if self.node_3==True and self.node_1==False and self.node_2==False:
+        #     print('node_2 calculation:')
+        #     self.run_fitter_r3()
+        #     report_fitter()
+        #     analysis_plot(title='РЕЗУЛЬТАТ')             
+        #     return
         
-        # только ветка 2, нам повезло
-        if self.node_2==True and self.node_1==False and self.node_3==False:
-            self.run_fitter_node2()
-            analysis_plot(title='РЕЗУЛЬТАТ')   
-            return
+        # # только ветка 2, нам повезло
+        # if self.node_2==True and self.node_1==False and self.node_3==False:
+        #     print('node_2 calculation:')
+        #     self.run_fitter_r2()
+        #     report_fitter()
+        #     analysis_plot(title='РЕЗУЛЬТАТ')              
+        #     return
         
         
-        # случай симметричной задачи              
-        self.run_fitter_node13()
-        analysis_plot(title='R1 R3')
-        self.run_fitter_node2()    
-        analysis_plot(title='R2')
-        self.run_fitter_node123()  
+        # все остальные случаи  
+                      
+        #self.run_fitter_r1r2r3()  
+        self.run_fitter_r1r2r3()  
+        report_fitter()   
         analysis_plot(title='РЕЗУЛЬТАТ')
-        return 
-    
-        self.run_fitter_node13()
-        self.run_fitter_node12()
-        self.run_fitter_node23() 
-        self.run_fitter_node2()            
-        self.run_fitter_node13()
-        analysis_plot(title='РЕЗУЛЬТАТ')
-                        
+        analysis_plotQ()
         
-    def run_me(self):        
-        # self.init_target1() # тест ветки 1
+            
+        
+    def run_me(self):           
+        # self.init_target_random() # тест ветки 1
         # self.reset_values()    
         # self.run_fitter()
-          
-        # self.init_target2()       
-        # self.reset_values()
-        # self.run_fitter()
-        # return 
-    
-        self.init_target3()
+        #G.restore_INIT_param()   
+        self.init_target1() # тест ветки 1
+        self.reset_values()    
+        self.run_fitter()
+        G.restore_INIT_param()
+         
+        self.init_target2()       
         self.reset_values()
         self.run_fitter()
+        G.restore_INIT_param()
+       
+        # self.init_target3()    
+        # analysis_plotQ()
+        # analysis_plot()
+        # #analysis_plot()
+        # self.reset_values()
+        # #self.run_fitter()
         
         
 #############################################################################    
-    
+Sch = CGeneralCircuit()
 def main():
     #my_test.test_all()
     #case1 = test_case_1()
     #print(case1)
-    Sch = CGeneralCircuit()
+    
     Sch.run_me()
     
     
