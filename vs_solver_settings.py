@@ -12,28 +12,41 @@
 # Ссылка на автора приветствуется, но не является обязательной 
 #
 
+# метод сравнения кривых тока и напряжения
 
-# использовать внешнюю библиотеку libivcmp для сравнения кривых?
-# !! установить True или False 
 USE_LIBIVCMP = False
+USE_FFT_FILTRATION = True
+FFT_HIGH = 35 
+
+#MISFIT_METHOD = 'libivcmp' # использовать внешнюю библиотеку libivcmp
+MISFIT_METHOD = 'sko'
+#MISFIT_METHOD = 'sko_fft'
+#MISFIT_METHOD = 'power'
+#MISFIT_METHOD = 'power_fft' 
+
+MISFIT_KIND = 'minimize' # сравнение по сумме несовпадений в точках
+#MISFIT_KIND = 'least_square' # сравнение по множеству точек
+
+
+CIR_TEMPLATE = 'general.cir_t'
 
 # метод оптимизации функции подбора параметров R,C,
 # варианты для функции scipy.optimize.minimum() 
 # !! Раскомментировать необходимый FITTER_METHOD
 FITTER_METHOD = 'Powell' # это метод работает лучше всего
 #FITTER_METHOD = 'Nelder-Mead' # тоже рабочий
-#FITTER_METHOD = None # не рабочий - происходит потеря точности 
+#FITTER_METHOD = 'SLSQP'  
 
 
 # частота, Гц
-INIT_F = 1000.
+INIT_F = 1e3
 # амплитудное напряжение, В
-INIT_V = 3.3
+INIT_V = 2.5
 # токоограничивающий резистор, Ом
-INIT_Rcs = .47
+INIT_Rcs = 0.47
 
 # SIGNAL/NOISE ratio
-INIT_SNR = 40.0
+INIT_SNR = 35.0
 
 # число циклов колебаний напряжения в записи
 INIT_CYCLE = 1
@@ -45,8 +58,6 @@ DIODE_VOLTAGE = 0.7
 
 # напряжение, при котором диоды считаем закрытыми
 SMALL_VOLTAGE = 0.1
-
-
 
 # "огромное сопротивление".
 HUGE_R = 1e10 # 
@@ -61,9 +72,10 @@ NONE_C = 1e-15 # 0.001 пФ
  
 # погрешность подбора кривых
 TOLERANCE = 1e-3
-# число точек в массивах тока и напряжения
 
-MAX_NUM_POINTS = 300
+# число точек в массивах тока и напряжения
+MAX_NUM_POINTS = 500
+
 
 
 _TOLERANCE = TOLERANCE
