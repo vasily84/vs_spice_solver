@@ -7,7 +7,7 @@
 # поставляется без всякой оптимизации, ибо имеет целью установление методики 
 # расчета таких вещей и определения границ применимости этой методики
 #
-# автор В.Симонов, 18-мая-2020
+# автор В.Симонов, 11-июнь-2020
 # vasily_simonov@mail.ru, github.com/vasily84
 #
 # license : это модуль в любом виде можно использовать в любых целях. 
@@ -22,18 +22,77 @@ from ctypes import c_double
 import csv
 
 
-# управляющие глобальные переменные
-import vs_solver_settings as G
 # модуль Михаила Лукьянова, github.com/LukyanovM/MySpice 
 import MySpice as spice
 # сравнение кривых - закомментировать, если этой библиотеки нет
 import libivcmp
-import random
 
 
-if G.USE_LIBIVCMP:
-    G.TOLERANCE = 1e-15
-    G.MAX_NUM_POINTS = libivcmp.MAX_NUM_POINTS
+### SETTINGS ################################################################
+# метод сравнения кривых тока и напряжения
+USE_LIBIVCMP = False
+USE_FFT_FILTRATION = False
+FFT_HIGH = 35 
+
+#MISFIT_METHOD = 'libivcmp' # использовать внешнюю библиотеку libivcmp
+# метод измерения непопадания.
+# может быть : 'libivcmp','sko_fft','power','power_fft'
+MISFIT_METHOD = 'sko'
+
+# метод оптимизации
+MISFIT_KIND = 'minimize' # сравнение по сумме несовпадений в точках
+#MISFIT_KIND = 'least_square' # сравнение по множеству точек
+
+CIR_TEMPLATE = 'general.cir_t'
+
+# метод оптимизации функции подбора параметров R,C,
+# варианты для функции scipy.optimize.minimum() 
+# !! Раскомментировать необходимый FITTER_METHOD
+FITTER_METHOD = 'Powell' # это метод работает лучше всего
+
+# частота, Гц
+INIT_F = 1e3
+# амплитудное напряжение, В
+INIT_V = 2.5
+# токоограничивающий резистор, Ом
+INIT_Rcs = 0.47
+
+# SIGNAL/NOISE ratio
+INIT_SNR = 35.0
+
+# число циклов колебаний напряжения в записи
+INIT_CYCLE = 1
+
+# падение напряжения на диоде
+# Диод считается полностью проводимым при напряжении больше чем DIODE_VOLTAGE,
+# при меньшем полность закрыт. (Приближение)
+DIODE_VOLTAGE = 0.7
+
+# напряжение, при котором диоды считаем закрытыми
+SMALL_VOLTAGE = 0.1
+
+# "огромное сопротивление".
+HUGE_R = 1e10 # 
+
+# "большое сопротивление"
+LARGE_R = 1e7 # 100 МегаОм
+# "мизерное сопротивление"
+NULL_R = 1e-6 # todo
+
+# "мизерная емкость"
+NONE_C = 1e-15 # 0.001 пФ
+ 
+# погрешность подбора кривых
+TOLERANCE = 1e-3
+
+# число точек в массивах тока и напряжения
+MAX_NUM_POINTS = 500
+
+#############################################################################
+
+if USE_LIBIVCMP:
+    TOLERANCE = 1e-15
+    MAX_NUM_POINTS = libivcmp.MAX_NUM_POINTS
 
 
 # результат последненго моделирования в PySpice
@@ -55,7 +114,25 @@ circuit_SessionFileName = 'var1.cir'
 # Шаблон файла схемы - файл с расширением *.cir_t, аналогичный файлу описания 
 # схемы ngspice *.cir, где вместо конкретного значения емкости или сопротивлния
 # компонента стоит символ замены '{}'
-circuit_TempateStrings = None
+circuit_TemplateStrings = ('* cir file corresponding to the equivalent circuit.',
+    '* Цепь 1\n',
+    'R1 _net1 Input {}\n',
+    'C1 _net0 _net1 {}\n',
+    'R_C1 _net0 _net1 {}\n',
+    'D1 _net0 0 DMOD_D1 AREA=1.0 Temp=26.85\n',
+    'R_D1 0 _net0 {}\n',
+    '* Цепь 2\n',
+    'R2 _net4 Input {}\n',
+    'C2 0 _net4 {}\n',
+    'R_C2 0 _net4 {}\n',
+    '* Цепь 3\n',
+    'R3 _net3 Input {}\n',
+    'C3 _net2 _net3 {}\n',
+    'R_C3 _net2 _net3 {}\n',
+    'D3 0 _net2 DMOD_D1 AREA=1.0 Temp=26.85\n',
+    'R_D3 0 _net2 {}\n',
+    '.MODEL DMOD_D1 D (Is=2.22e-10 N=1.65 Cj0=4e-12 M=0.333 Vj=0.7 Fc=0.5 Rs=0.0686 Tt=5.76e-09 Ikf=0 Kf=0 Af=1 Bv=75 Ibv=1e-06 Xti=3 Eg=1.11 Tcv=0 Trs=0 Ttt1=0 Ttt2=0 Tm1=0 Tm2=0 Tnom=26.85 )\n',
+    '.END' )
 
 # список значений для файла шаблона схемы. Число элементов - не меньше, чем 
 # знаков {} в файле шаблона схемы
@@ -123,16 +200,16 @@ def set_Xi_variable(vlist):
         
 # установить файл шаблона схемы. Считать его в набор строк.
 def set_circuit_template(fileName):
-    global circuit_TempateStrings
-    circuit_TempateStrings = []
+    global circuit_TemplateStrings
+    circuit_TemplateStrings = []
     templateF = open(fileName)
     
     for tStr in templateF:
-        circuit_TempateStrings += [tStr]
+        circuit_TemplateStrings += [tStr]
         #
     templateF.close()
    
-    
+
 # инициализировать целевую модель, промоделировав файл схемы
 def init_target_by_circuitFile(fileName = circuit_SessionFileName):
     global target_VCurrent, target_input_dummy, target_IVCurve,target_Q
@@ -140,13 +217,14 @@ def init_target_by_circuitFile(fileName = circuit_SessionFileName):
     target_VCurrent = analysis.VCurrent
     target_input_dummy = analysis.input_dummy
     
-    if G.USE_LIBIVCMP:
+    if USE_LIBIVCMP:
         target_IVCurve = analysis_to_IVCurve()
               
            
 # инициализировать целевую модель данными из csv файла, с заданной частотой,
 # амплитудой, и токоограничивающим резистором
-def init_target_from_csvFile(fileName, F=G.INIT_F, V=G.INIT_V, Rcs=G.INIT_Rcs):
+def init_target_from_csvFile(fileName, F=INIT_F, V=INIT_V, Rcs=INIT_Rcs):
+    global INIT_F,INIT_V,INIT_Rcs
     global target_VCurrent,target_input_dummy,target_IVCurve
     #
     with open(fileName,newline='') as csv_file:
@@ -162,13 +240,13 @@ def init_target_from_csvFile(fileName, F=G.INIT_F, V=G.INIT_V, Rcs=G.INIT_Rcs):
             
     
     # 
-    G.INIT_F = F
-    G.INIT_V = V
-    G.INIT_Rcs = Rcs
+    INIT_F = F
+    INIT_V = V
+    INIT_Rcs = Rcs
     
-    if G.USE_LIBIVCMP:
+    if USE_LIBIVCMP:
         iv_curve = libivcmp.IvCurve()
-        for i in range(G.MAX_NUM_POINTS):
+        for i in range(MAX_NUM_POINTS):
             iv_curve.voltages[i] = c_double(target_VCurrent[i])
             iv_curve.currents[i] = c_double(target_input_dummy[i])
         
@@ -196,7 +274,7 @@ def generate_circuitFile_by_values( Xi_values):
     rc_values = Xi_to_RC(Xi_values)
     i = 0
     
-    for tStr in circuit_TempateStrings:
+    for tStr in circuit_TemplateStrings:
         cStr = tStr
         if tStr.find('{}')>=0:
             cStr = tStr.format(str(np.abs(rc_values[i]))) # ставим абсолютные значения номиналов
@@ -213,15 +291,15 @@ def process_circuitFile(csvName=''):
     fileName=circuit_SessionFileName
     
     circuit = spice.LoadFile(fileName)
-    input_data = spice.Init_Data(G.INIT_F, G.INIT_V, G.INIT_Rcs,G.INIT_SNR )
-    analysis = spice.CreateCVC1(circuit, input_data, G.MAX_NUM_POINTS, "input", G.INIT_CYCLE)   
+    input_data = spice.Init_Data(INIT_F, INIT_V, INIT_Rcs,INIT_SNR )
+    analysis = spice.CreateCVC1(circuit, input_data, MAX_NUM_POINTS, "input", INIT_CYCLE)   
     
     if(not csvName==''):
         spice.SaveFile(analysis, csvName)
  
     
-def my_fft_filtration(data, high=G.FFT_HIGH):
-    if G.USE_FFT_FILTRATION:
+def my_fft_filtration(data, high=FFT_HIGH):
+    if USE_FFT_FILTRATION:
         f_data = scf.rfft(data)
         f_data[high:] = 0.
         i_data = scf.irfft(f_data)
@@ -231,7 +309,7 @@ def my_fft_filtration(data, high=G.FFT_HIGH):
 # последний анализ перевести в форму, пригодную для сравнения в libivcmp
 def analysis_to_IVCurve():
     iv_curve = libivcmp.IvCurve()
-    for i in range(G.MAX_NUM_POINTS):
+    for i in range(MAX_NUM_POINTS):
         iv_curve.voltages[i] = c_double(analysis.VCurrent[i])
         iv_curve.currents[i] = c_double(analysis.input_dummy[i])
         
@@ -243,7 +321,7 @@ def V_div_I(v,i):
     try:
         r = v/i
     except ArithmeticError:
-        r = G.HUGE_R
+        r = HUGE_R
     return r
 
 
@@ -302,7 +380,8 @@ def my_PowerPrime_plot():
 
 # вывести на график результат моделирования
 def analysis_plot(title='',pngName=''):
-    figure1 = plt.figure(1, (20, 10))
+    #figure1 = plt.figure(1, (20, 10))
+    plt.figure(1, (20, 10))
     plt.grid()
     
     # целевая ВАХ
@@ -323,7 +402,8 @@ def analysis_plot(title='',pngName=''):
     
 # вывести на график спектр сигнала
 def analysis_plotFFT():
-    figure = plt.figure(1,(20,10))
+    #figure = plt.figure(1,(20,10))
+    plt.figure(1,(20,10))
     plt.grid()
     
     S1 = scf.rfft(target_VCurrent)
@@ -340,12 +420,12 @@ def analysis_plotFFT():
 
 #### ФУНКЦИИ СРАВНЕНИЯ ВАХ ################################################### 
 def C_to_R(c):
-    r = 1/(2.*np.pi*G.INIT_F*c)
+    r = 1/(2.*np.pi*INIT_F*c)
     return r
 
 
 def R_to_C(r):
-    c = 1/(2.*np.pi*G.INIT_F*r)
+    c = 1/(2.*np.pi*INIT_F*r)
     return c
 
 
@@ -360,27 +440,27 @@ def analysis_misfit_core():
     volt_t = my_fft_filtration(target_input_dummy)
     volt_a = my_fft_filtration(analysis.input_dummy)
     
-    if G.MISFIT_METHOD == 'power':
+    if MISFIT_METHOD == 'power':
         r = (curr_t*volt_t-curr_a*volt_a)
         return r
     
-    if G.MISFIT_METHOD == 'power_fft':
+    if MISFIT_METHOD == 'power_fft':
         r = scf.rfft(curr_t*volt_t-curr_a*volt_a)       
         return r
     
-    if G.MISFIT_METHOD == 'sko':
+    if MISFIT_METHOD == 'sko':
         r = (curr_t-curr_a)
         #r2 = r*r
         r2 = np.abs(r)
         return r2
     
-    if G.MISFIT_METHOD == 'sko_fft':
+    if MISFIT_METHOD == 'sko_fft':
         r = (curr_t-curr_a)
         r2 = r*r
         return scf.rfft(r2)
     
-    if G.MISFIT_METHOD == 'libivcmp':
-        if G.USE_FFT_FILTRATION:
+    if MISFIT_METHOD == 'libivcmp':
+        if USE_FFT_FILTRATION:
             s = "USE_FFT_FILTRATION=True incompatible with MISFIT_METHOD = 'libivcmp'"
             raise RuntimeError(s)
             
@@ -389,7 +469,7 @@ def analysis_misfit_core():
         r = np.array([res])
         return r
     
-    s = "unknown MISFIT_METHOD = '"+str(G.MISFIT_METHOD)+"'"
+    s = "unknown MISFIT_METHOD = '"+str(MISFIT_METHOD)+"'"
     raise RuntimeError(s)
 
     
@@ -435,7 +515,7 @@ def fitter_subroutine(Xargs):
     Mscalar = np.sum(np.abs(Mcore))
     Mresult = Mcore
     
-    if G.MISFIT_KIND=='minimize': # используем оптимизатор скалярной функции
+    if MISFIT_KIND=='minimize': # используем оптимизатор скалярной функции
         Mresult = Mscalar
     
     
@@ -459,12 +539,12 @@ def fitter_subroutine(Xargs):
 
 # запустить автоподбор
 def run_fitter(result_cir_file_name='',result_csv_file_name=''):       
-    if G.MISFIT_KIND == 'minimize': 
+    if MISFIT_KIND == 'minimize': 
         return run_fitter_minimize(result_cir_file_name='',result_csv_file_name='')  
-    if G.MISFIT_KIND == 'least_square':        
+    if MISFIT_KIND == 'least_square':        
         return run_fitter_sqleast(result_cir_file_name='',result_csv_file_name='') 
          
-    s = "unknown MISFIT_KIND = '"+str(G.MISFIT_KIND)+"'"
+    s = "unknown MISFIT_KIND = '"+str(MISFIT_KIND)+"'"
     raise RuntimeError(s)
     
 
@@ -492,8 +572,8 @@ def run_fitter_sqleast(result_cir_file_name='',result_csv_file_name=''):
     
     bnds = np.array((min_bnds,max_bnds))
     
-    #resX = spo.least_squares(fitter_subroutine_sqleast,Xargs,bounds=bnds,xtol=None,ftol=G.TOLERANCE,gtol=None,diff_step=x_dif,max_nfev=1000)
-    resX = spo.least_squares(fitter_subroutine,Xargs,jac='3-point',bounds=bnds,method='dogbox',xtol=None,ftol=G.TOLERANCE,gtol=None,diff_step=x_dif,tr_solver='lsmr',max_nfev=1000)
+    #resX = spo.least_squares(fitter_subroutine_sqleast,Xargs,bounds=bnds,xtol=None,ftol=TOLERANCE,gtol=None,diff_step=x_dif,max_nfev=1000)
+    resX = spo.least_squares(fitter_subroutine,Xargs,jac='3-point',bounds=bnds,method='dogbox',xtol=None,ftol=TOLERANCE,gtol=None,diff_step=x_dif,tr_solver='lsmr',max_nfev=1000)
     
     
     print(resX.message)
@@ -521,7 +601,7 @@ def run_fitter_minimize(result_cir_file_name='',result_csv_file_name=''):
     for i in range(0,len(Xargs)):
         Xargs[i] = 0.
        
-    resX = spo.minimize(fitter_subroutine,Xargs,method=G.FITTER_METHOD,tol=G.TOLERANCE,options={'maxiter':1000})   
+    resX = spo.minimize(fitter_subroutine,Xargs,method=FITTER_METHOD,tol=TOLERANCE,options={'maxiter':1000})   
     # вызываем с результатом оптимизации, ибо предыдущий вызов может быть неоптимальным
     # generate_circuitFile_by_values(Xi_result)
     # process_circuitFile()  
@@ -537,27 +617,27 @@ def run_fitter_minimize(result_cir_file_name='',result_csv_file_name=''):
 ##############################################################################
 def Sch_init():
     sch = {}
-    sch['R1'] = G.HUGE_R
-    sch['C1'] = (G.NONE_C) # [1]
-    sch['_R_C1'] = G.NULL_R 
-    sch['_R_D1'] = G.HUGE_R
+    sch['R1'] = HUGE_R
+    sch['C1'] = NONE_C # [1]
+    sch['_R_C1'] = NULL_R 
+    sch['_R_D1'] = HUGE_R
     
-    sch['R2'] = G.HUGE_R 
-    sch['C2'] = (G.NONE_C) # [5]
-    sch['_R_C2'] = G.NULL_R
+    sch['R2'] = HUGE_R 
+    sch['C2'] = NONE_C # [5]
+    sch['_R_C2'] = NULL_R
     
-    sch['R3'] = G.HUGE_R 
-    sch['C3'] = (G.NONE_C) #[8]
-    sch['_R_C3'] = G.NULL_R 
-    sch['_R_D3'] = G.HUGE_R         
+    sch['R3'] = HUGE_R 
+    sch['C3'] = NONE_C #[8]
+    sch['_R_C3'] = NULL_R 
+    sch['_R_D3'] = HUGE_R         
     return sch
 
 
 def Sch_set_switch(sch,key,using_sw):
     if using_sw:
-        r_sw = G.HUGE_R
+        r_sw = HUGE_R
     else:
-        r_sw = G.NULL_R
+        r_sw = NULL_R
         
     if key=='C1': sch['_R_C1']= r_sw
     if key=='C2': sch['_R_C2']= r_sw
@@ -593,17 +673,17 @@ def Sch_init_by_approximation(sch):
     max_cur_ind = np.argmax(target_VCurrent)
     max_volt_ind = np.argmax(target_input_dummy)
     
-    phase_1 = 2.*np.pi*(max_cur_ind-max_volt_ind)/(G.MAX_NUM_POINTS)
+    phase_1 = 2.*np.pi*(max_cur_ind-max_volt_ind)/(MAX_NUM_POINTS)
     
-    V_max = target_input_dummy[max_cur_ind]-G.DIODE_VOLTAGE
+    V_max = target_input_dummy[max_cur_ind]-DIODE_VOLTAGE
     Z1 = V_div_I(V_max,I_max)
-    Z1_ = V_div_I(V_max+G.DIODE_VOLTAGE,I_max)
+    #Z1_ = V_div_I(V_max+DIODE_VOLTAGE,I_max)
     R1 = Z1*np.cos(phase_1)
     C1 = R_to_C(Z1*np.sin(phase_1))
     
     sch['R1'] = np.abs(R1)
     if np.abs(phase_1*180./np.pi)>1.:
-        sch['_R_C1'] = G.HUGE_R
+        sch['_R_C1'] = HUGE_R
         sch['C1'] = C1
     
     # print('R1='+str(R1)+', C1='+str(C1)+' Z1='+str(Z1)+' ,Z1_='+str(Z1_))  
@@ -614,11 +694,11 @@ def Sch_init_by_approximation(sch):
     min_cur_ind = np.argmin(target_VCurrent)
     min_volt_ind = np.argmin(target_input_dummy)
     
-    V_min = target_input_dummy[min_cur_ind]+G.DIODE_VOLTAGE
+    V_min = target_input_dummy[min_cur_ind]+DIODE_VOLTAGE
     Z3 = V_div_I(V_min,I_min)
-    Z3_ = V_div_I(V_min-G.DIODE_VOLTAGE,I_min)
+    #Z3_ = V_div_I(V_min-DIODE_VOLTAGE,I_min)
     
-    phase_3 = 2.*np.pi*(min_cur_ind-min_volt_ind)/(G.MAX_NUM_POINTS)
+    phase_3 = 2.*np.pi*(min_cur_ind-min_volt_ind)/(MAX_NUM_POINTS)
     
     R3 = Z3*np.cos(phase_3)
     C3 = R_to_C(Z3*np.sin(phase_3))
@@ -627,14 +707,14 @@ def Sch_init_by_approximation(sch):
     
     sch['R3'] = np.abs(R3)
     if np.abs(phase_3*180./np.pi)>1.:
-        sch['_R_C3'] = G.HUGE_R
+        sch['_R_C3'] = HUGE_R
         sch['C3'] = C3
         
     R2 = R1+R3  # переделать на окрестности малого сигнала
     C2 = C1+C3  # переделать на сдвиг фаз в окрестности ноля
     sch['R2'] = R2
     if C_to_R(C2)>0.01*R2:
-        sch['_R_C3'] = G.HUGE_R
+        sch['_R_C3'] = HUGE_R
         sch['C2'] = C2
         
     
@@ -668,11 +748,7 @@ def Session_run(session):
    
     
 # проверить, имеет ли смысл такая установка переключателей в схеме
-def is_valid_switchers(swcode):
-    r1_mask = 1+8+16 # R1+C1+D1
-    r2_mask = 2+128 # R2+C2
-    r3_mask = 3+32+64 #R3+C3+D3
-    
+def is_valid_switchers(swcode):  
     if swcode & (1+2+3): # все ветви заглушены
         return False
     
@@ -698,54 +774,54 @@ def Session_set_switchers(session, swcode):
     
     if swcode & 1: # ветка 1  
         #print('dnp branch1')
-        sch['R1'] = G.HUGE_R
+        sch['R1'] = HUGE_R
     else:
         var_list +=['R1']
         
     if swcode & 2: # ветка 2 
         #print('dnp branch2') 
-        sch['R2'] = G.HUGE_R
+        sch['R2'] = HUGE_R
     else:
         var_list += ['R2']
     
     if swcode & 4: # ветка 3  
         #print('dnp branch3')
-        sch['R3'] = G.HUGE_R
+        sch['R3'] = HUGE_R
     else:
         var_list += ['R3']
         
     if swcode & 8: # C1  
         #print('dnp C1')
-        sch['_R_C1'] = G.NULL_R
+        sch['_R_C1'] = NULL_R
     else:
-        sch['_R_C1'] = G.HUGE_R
+        sch['_R_C1'] = HUGE_R
         var_list += ['C1']
         
     if swcode & 16: # D1 
         #print('dnp D1') 
-        sch['_R_D1'] = G.NULL_R
+        sch['_R_D1'] = NULL_R
     else:
-        sch['_R_D1'] = G.HUGE_R
+        sch['_R_D1'] = HUGE_R
         
     
     if swcode & 32: # C3 
         #print('dnp C3')
-        sch['_R_C3'] = G.NULL_R
+        sch['_R_C3'] = NULL_R
     else:
-        sch['_R_C3'] = G.HUGE_R
+        sch['_R_C3'] = HUGE_R
         var_list += ['C3']
         
     if swcode & 64: # D3  
         #print('dnp D3')
-        sch['_R_D3'] = G.NULL_R
+        sch['_R_D3'] = NULL_R
     else:
-        sch['_R_D3'] = G.HUGE_R
+        sch['_R_D3'] = HUGE_R
         
     if swcode & 128: # C2
         #print('dnp C2')
-        sch['_R_C2'] = G.NULL_R
+        sch['_R_C2'] = NULL_R
     else:
-        sch['_R_C2'] = G.HUGE_R
+        sch['_R_C2'] = HUGE_R
         var_list += ['C2']
     
     session['Xi_variable'] = var_list  
@@ -784,12 +860,12 @@ def test1():
     sch = Sch_init()
     sch['R1'] = 1e-2
     sch['C1'] = 1e-5
-    sch['_R_C1'] = G.HUGE_R
+    sch['_R_C1'] = HUGE_R
     sch['R2'] = 1e2
-    # sch['_R_C2'] = G.HUGE_R
+    # sch['_R_C2'] = HUGE_R
     # sch['C2'] = 1e-5
     # sch['C3'] = 1.3e-6
-    # sch['_R_C3'] = G.HUGE_R
+    # sch['_R_C3'] = HUGE_R
     sch['R3'] = 1e3
     init_target_by_Sch(sch)
     Session_processAll()
@@ -799,12 +875,12 @@ def test2():
     sch = Sch_init()
     sch['R1'] = 1e2
     sch['C1'] = 1e-5
-    sch['_R_C1'] = G.HUGE_R
+    sch['_R_C1'] = HUGE_R
     # sch['R2'] = 1e2
-    # sch['_R_C2'] = G.HUGE_R
+    # sch['_R_C2'] = HUGE_R
     # sch['C2'] = 1e-5
     # sch['C3'] = 1.3e-6
-    # sch['_R_C3'] = G.HUGE_R
+    # sch['_R_C3'] = HUGE_R
     sch['R3'] = 1e3
     init_target_by_Sch(sch)
     Session_processAll()
@@ -813,12 +889,12 @@ def test3():
     sch = Sch_init()
     # sch['R1'] = 1e-1
     # sch['C1'] = 1e-5
-    # sch['_R_C1'] = G.HUGE_R
+    # sch['_R_C1'] = HUGE_R
     sch['R2'] = 1e2
-    sch['_R_C2'] = G.HUGE_R
+    sch['_R_C2'] = HUGE_R
     sch['C2'] = 1e-7
     # sch['C3'] = 1.3e-6
-    # sch['_R_C3'] = G.HUGE_R
+    # sch['_R_C3'] = HUGE_R
     # sch['R3'] = 1e-3
     init_target_by_Sch(sch)
     Session_processAll()
@@ -828,12 +904,12 @@ def test4():
     sch = Sch_init()
     # sch['R1'] = 1e2
     # sch['C1'] = 1e-5
-    # sch['_R_C1'] = G.HUGE_R
+    # sch['_R_C1'] = HUGE_R
     sch['R2'] = 1e2
-    sch['_R_C2'] = G.HUGE_R
+    sch['_R_C2'] = HUGE_R
     sch['C2'] = 1e-7
     # sch['C3'] = 1.3e-6
-    # sch['_R_C3'] = G.HUGE_R
+    # sch['_R_C3'] = HUGE_R
     sch['R3'] = 1e3
     init_target_by_Sch(sch)
     Session_processAll()
@@ -843,16 +919,14 @@ def test_data(csv_data):
     Session_processAll()
       
     
-def main():
-    set_circuit_template(G.CIR_TEMPLATE)  
-    test1()
-    test2()
-    test3()
+def main(): 
+    # test1()
+    # test2()
+    # test3()
     test4()
-    test_data('test_data1.csv')
-    test_data('test_data2.csv')
-    test_data('test_data3.csv')
-    
+    # test_data('test_data1.csv')
+    # test_data('test_data2.csv')
+    # test_data('test_data3.csv')
     
     
 if __name__=='__main__':
