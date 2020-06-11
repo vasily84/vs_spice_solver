@@ -1,0 +1,21 @@
+ ј  ”—“јЌќ¬»“№ » Ќј„ј“№ »—ѕќЋ№«ќ¬ј“№?
+
+дл€ работы программы требуетс€ 
+интерпретатор €зыка -  
+1.python3
+и библиотеки
+2. numpy - [ pip install numpy ]
+3. scipy - [ pip install scipy ]
+4. matplotlib - [pip install matplotlib ]
+6. MySpice - инструкции по установке https://github.com/LukyanovM/MySpice
+6*. PySpice - иструкции по установке https://github.com/FabriceSalvaire/PySpice
+6**. ngspice - инструкции по установке см. п 5.
+
+7. libivcmp - ivcmp - ¬аша библиотека, инструкции по установке в readme. 
+ 
+пп.1-4 можно установить разом, установив  Anaconda - https://www.anaconda.com/products/individual
+  
+сама программа - теперь один файл.  
+vs_circuit_solver.py                
+
+запускать где угодно, € запускал из среды разработки spyder                 
