@@ -29,21 +29,24 @@ import libivcmp
 
 
 ### SETTINGS ################################################################
-# метод сравнения кривых тока и напряжения
 USE_LIBIVCMP = False
 USE_FFT_FILTRATION = False
 FFT_HIGH = 35 
 
+# метод сравнения кривых тока и напряжения
 #MISFIT_METHOD = 'libivcmp' # использовать внешнюю библиотеку libivcmp
 # метод измерения непопадания.
-# может быть : 'libivcmp','sko_fft','power','power_fft'
+# может быть : 'libivcmp','sko','sko_fft','power','power_fft'
 MISFIT_METHOD = 'sko'
+
+if MISFIT_METHOD == 'libivcmp':
+    USE_LIBIVCMP = True
+else:
+    USE_LIBIVCMP = False
 
 # метод оптимизации
 MISFIT_KIND = 'minimize' # сравнение по сумме несовпадений в точках
 #MISFIT_KIND = 'least_square' # сравнение по множеству точек
-
-CIR_TEMPLATE = 'general.cir_t'
 
 # метод оптимизации функции подбора параметров R,C,
 # варианты для функции scipy.optimize.minimum() 
@@ -55,18 +58,18 @@ INIT_F = 1e3
 # амплитудное напряжение, В
 INIT_V = 2.5
 # токоограничивающий резистор, Ом
-INIT_Rcs = 0.47
+INIT_Rcs = 0.00047
 
 # SIGNAL/NOISE ratio
-INIT_SNR = 35.0
+INIT_SNR = 135.0
 
 # число циклов колебаний напряжения в записи
-INIT_CYCLE = 1
+INIT_CYCLE = 10
 
 # падение напряжения на диоде
 # Диод считается полностью проводимым при напряжении больше чем DIODE_VOLTAGE,
 # при меньшем полность закрыт. (Приближение)
-DIODE_VOLTAGE = 0.7
+DIODE_VOLTAGE = 0.6
 
 # напряжение, при котором диоды считаем закрытыми
 SMALL_VOLTAGE = 0.1
@@ -85,14 +88,11 @@ NONE_C = 1e-15 # 0.001 пФ
 # погрешность подбора кривых
 TOLERANCE = 1e-3
 
-# число точек в массивах тока и напряжения
+# число точек в массивах тока и напряжения, может измениться при загрузке 
+# внешнего файла данных
 MAX_NUM_POINTS = 500
 
 #############################################################################
-
-if USE_LIBIVCMP:
-    TOLERANCE = 1e-15
-    MAX_NUM_POINTS = libivcmp.MAX_NUM_POINTS
 
 
 # результат последненго моделирования в PySpice
@@ -102,6 +102,7 @@ analysis = None
 target_VCurrent = None
 target_input_dummy = None
 
+target_fileName = ''
 
 # целевая кривая с током для сравнения в библиотеке libivcmp
 target_IVCurve = None
@@ -138,8 +139,6 @@ circuit_TemplateStrings = ('* cir file corresponding to the equivalent circuit.'
 # знаков {} в файле шаблона схемы
 Xi_long = [0.,0.,0.,0., 0.,0.,0., 0.,0.,0.,0.]
 
-# погрешность отпредения независимой переменной
-#Xi_step = [1.,1.,1.,1., 1.,1.,1., 1.,1.,1.,1.]
 
 # Маска оптимизируемых параметров - список булевого типа, например -
 # Xi_long = [a, b, c, d]
@@ -212,7 +211,7 @@ def set_circuit_template(fileName):
 
 # инициализировать целевую модель, промоделировав файл схемы
 def init_target_by_circuitFile(fileName = circuit_SessionFileName):
-    global target_VCurrent, target_input_dummy, target_IVCurve,target_Q
+    global target_VCurrent, target_input_dummy, target_IVCurve
     process_circuitFile()
     target_VCurrent = analysis.VCurrent
     target_input_dummy = analysis.input_dummy
@@ -221,12 +220,15 @@ def init_target_by_circuitFile(fileName = circuit_SessionFileName):
         target_IVCurve = analysis_to_IVCurve()
               
            
-# инициализировать целевую модель данными из csv файла, с заданной частотой,
-# амплитудой, и токоограничивающим резистором
-def init_target_from_csvFile(fileName, F=INIT_F, V=INIT_V, Rcs=INIT_Rcs):
-    global INIT_F,INIT_V,INIT_Rcs
+# инициализировать целевую модель данными из csv файла, установить число точек на кривой MAX_NUM_POINTS
+# определенными из файла 
+def init_target_from_csvFile(fileName):
+    global MAX_NUM_POINTS,INIT_V
+    global target_fileName
     global target_VCurrent,target_input_dummy,target_IVCurve
     #
+    target_fileName = fileName
+    
     with open(fileName,newline='') as csv_file:
         csv_reader = csv.reader(csv_file, delimiter=';')
         i = 0
@@ -236,14 +238,11 @@ def init_target_from_csvFile(fileName, F=INIT_F, V=INIT_V, Rcs=INIT_Rcs):
                 target_input_dummy = np.array(row,dtype=float)
             if i==2:
                 target_VCurrent = np.array(row,dtype=float) 
-            i += 1
-            
+            i += 1         
     
-    # 
-    INIT_F = F
-    INIT_V = V
-    INIT_Rcs = Rcs
-    
+    MAX_NUM_POINTS = len(target_input_dummy)
+    INIT_V = np.amax(target_input_dummy)
+
     if USE_LIBIVCMP:
         iv_curve = libivcmp.IvCurve()
         for i in range(MAX_NUM_POINTS):
@@ -375,9 +374,6 @@ def my_PowerPrime_plot():
     
     
     
-
-
-
 # вывести на график результат моделирования
 def analysis_plot(title='',pngName=''):
     #figure1 = plt.figure(1, (20, 10))
@@ -388,12 +384,18 @@ def analysis_plot(title='',pngName=''):
     plt.plot(target_input_dummy, target_VCurrent,color='red')
     # ВАХ результат подбора
     plt.plot(analysis.input_dummy, analysis.VCurrent,color='blue')  
-           
-    
+        
     if (not title==''):
-       plt.title(title)       
+       s = title
+    elif not target_fileName=='':
+       s = target_fileName
+     
+    s = s+', misfit='+str(misfit_result)
+    plt.title(s)
+    
     plt.xlabel('Напряжение [В]')
     plt.ylabel('Сила тока [А]')
+    
     if(not pngName==''):
         plt.savefig(pngName)
         
@@ -588,7 +590,7 @@ def run_fitter_sqleast(result_cir_file_name='',result_csv_file_name=''):
     if(not result_csv_file_name==''):
         spice.SaveFile(analysis, result_csv_file_name)
     if(not result_cir_file_name==''):          
-        generate_circuitFile_by_values(resX.x,result_cir_file_name)
+        generate_circuitFile_by_values(resX.x)
     
     return True
 
@@ -609,7 +611,7 @@ def run_fitter_minimize(result_cir_file_name='',result_csv_file_name=''):
     if(not result_csv_file_name==''):
         spice.SaveFile(analysis, result_csv_file_name)
     if(not result_cir_file_name==''):          
-        generate_circuitFile_by_values(resX.x,result_cir_file_name)
+        generate_circuitFile_by_values(resX.x)
     
     return True
     
@@ -917,15 +919,22 @@ def test4():
 def test_data(csv_data):
     init_target_from_csvFile(csv_data)
     Session_processAll()
-      
+
+def test_data1(csv_data):
+    init_target_from_csvFile(csv_data)
+    #analysis_plot()
+    plt.plot(target_input_dummy)
+    plt.text(75,0.5,'text\ntext2')
+    plt.show()  
     
 def main(): 
+    #init_target_from_csvFile('пример1.csv')
     # test1()
     # test2()
     # test3()
-    test4()
-    # test_data('test_data1.csv')
-    # test_data('test_data2.csv')
+    # test4()
+    #test_data1('пример3.csv')
+    test_data('test_data2.csv')
     # test_data('test_data3.csv')
     
     
