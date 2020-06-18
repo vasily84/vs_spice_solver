@@ -7,64 +7,45 @@
 # поставляется без всякой оптимизации, ибо имеет целью установление методики 
 # расчета таких вещей и определения границ применимости этой методики
 #
-# автор В.Симонов, 11-июнь-2020
+# автор В.Симонов, 18-июнь-2020
 # vasily_simonov@mail.ru, github.com/vasily84
 #
 # license : это модуль в любом виде можно использовать в любых целях. 
 # Ссылка на автора приветствуется, но не является обязательной 
 #
 
+
 import scipy.optimize as spo
 import scipy.fft as scf
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 from ctypes import c_double
 import csv
-
-
-# модуль Михаила Лукьянова, github.com/LukyanovM/MySpice 
+# внешние модули
 import MySpice as spice
-# сравнение кривых - закомментировать, если этой библиотеки нет
 import libivcmp
 
 
 ### SETTINGS ################################################################
-USE_LIBIVCMP = False
-USE_FFT_FILTRATION = False
-FFT_HIGH = 35 
 
 # метод сравнения кривых тока и напряжения
-#MISFIT_METHOD = 'libivcmp' # использовать внешнюю библиотеку libivcmp
-# метод измерения непопадания.
 # может быть : 'libivcmp','sko','sko_fft','power','power_fft'
 MISFIT_METHOD = 'sko'
 
-if MISFIT_METHOD == 'libivcmp':
-    USE_LIBIVCMP = True
-else:
-    USE_LIBIVCMP = False
-
-# метод оптимизации
-MISFIT_KIND = 'minimize' # сравнение по сумме несовпадений в точках
-#MISFIT_KIND = 'least_square' # сравнение по множеству точек
-
-# метод оптимизации функции подбора параметров R,C,
-# варианты для функции scipy.optimize.minimum() 
-# !! Раскомментировать необходимый FITTER_METHOD
-FITTER_METHOD = 'Powell' # это метод работает лучше всего
-
 # частота, Гц
 INIT_F = 1e3
-# амплитудное напряжение, В
+# амплитудное напряжение, Вольт, может изменится при загрузке внешнего файла данных
 INIT_V = 2.5
+
 # токоограничивающий резистор, Ом
-INIT_Rcs = 0.00047
+INIT_Rcs = 0.47
 
 # SIGNAL/NOISE ratio
 INIT_SNR = 135.0
 
 # число циклов колебаний напряжения в записи
-INIT_CYCLE = 10
+INIT_CYCLE = 5
 
 # падение напряжения на диоде
 # Диод считается полностью проводимым при напряжении больше чем DIODE_VOLTAGE,
@@ -75,25 +56,28 @@ DIODE_VOLTAGE = 0.6
 SMALL_VOLTAGE = 0.1
 
 # "огромное сопротивление".
-HUGE_R = 1e10 # 
+HUGE_R = 1e10 # 10 ГОм
 
-# "большое сопротивление"
-LARGE_R = 1e7 # 100 МегаОм
 # "мизерное сопротивление"
-NULL_R = 1e-6 # todo
+NULL_R = 1e-6 # 1 мкОм
 
 # "мизерная емкость"
 NONE_C = 1e-15 # 0.001 пФ
  
-# погрешность подбора кривых
-TOLERANCE = 1e-3
+# погрешность подбора кривых- критерий остановки. Подбор длится до тех пор, 
+# пока функция сравнения не вернет значение CompareIvc()<=IVCMP_TOLERANCE     
+IVCMP_TOLERANCE = 1e-8
+
+# погрешность подбора номиналов в процентах. Номиналы емкостей считаются по 
+# реактивному сопротивлению!. Подробности см. scipy.minimize(method='Powell')
+VALUES_TOLERANCE = 1e-2
+
 
 # число точек в массивах тока и напряжения, может измениться при загрузке 
 # внешнего файла данных
 MAX_NUM_POINTS = 500
 
 #############################################################################
-
 
 # результат последненго моделирования в PySpice
 analysis = None
@@ -174,7 +158,6 @@ def set_circuit_nominals(nominals):
     Xi_long = nominals.copy()
     
     
-    
 def reset_Xi_variable():
     for i in range(len(Xi_mask)):
         Xi_mask[i] = False
@@ -216,14 +199,13 @@ def init_target_by_circuitFile(fileName = circuit_SessionFileName):
     target_VCurrent = analysis.VCurrent
     target_input_dummy = analysis.input_dummy
     
-    if USE_LIBIVCMP:
-        target_IVCurve = analysis_to_IVCurve()
+    target_IVCurve = analysis_to_IVCurve()
               
            
 # инициализировать целевую модель данными из csv файла, установить число точек на кривой MAX_NUM_POINTS
 # определенными из файла 
 def init_target_from_csvFile(fileName):
-    global MAX_NUM_POINTS,INIT_V
+    global MAX_NUM_POINTS,INIT_V,NORMA_misfit
     global target_fileName
     global target_VCurrent,target_input_dummy,target_IVCurve
     #
@@ -243,15 +225,20 @@ def init_target_from_csvFile(fileName):
     MAX_NUM_POINTS = len(target_input_dummy)
     INIT_V = np.amax(target_input_dummy)
 
-    if USE_LIBIVCMP:
-        iv_curve = libivcmp.IvCurve()
-        for i in range(MAX_NUM_POINTS):
-            iv_curve.voltages[i] = c_double(target_VCurrent[i])
-            iv_curve.currents[i] = c_double(target_input_dummy[i])
-        
-        libivcmp.SetMinVC(0, 0)
-        target_IVCurve = iv_curve
+    iv_curve = libivcmp.IvCurve()
+    for i in range(MAX_NUM_POINTS):
+        iv_curve.voltages[i] = c_double(target_VCurrent[i])
+        iv_curve.currents[i] = c_double(target_input_dummy[i])
     
+    libivcmp.SetMinVC(0, 0)
+    libivcmp.set_MAX_NUM_POINTS(MAX_NUM_POINTS)
+    target_IVCurve = iv_curve
+    
+    try:
+        NORMA_misfit=1./target_misfit_norma1()
+    except ArithmeticError:
+        NORMA_misfit=1.
+        
     return
 
 
@@ -296,14 +283,6 @@ def process_circuitFile(csvName=''):
     if(not csvName==''):
         spice.SaveFile(analysis, csvName)
  
-    
-def my_fft_filtration(data, high=FFT_HIGH):
-    if USE_FFT_FILTRATION:
-        f_data = scf.rfft(data)
-        f_data[high:] = 0.
-        i_data = scf.irfft(f_data)
-        return i_data
-    return data
 
 # последний анализ перевести в форму, пригодную для сравнения в libivcmp
 def analysis_to_IVCurve():
@@ -323,55 +302,6 @@ def V_div_I(v,i):
         r = HUGE_R
     return r
 
-
-def create_stat_series():
-    u = {}
-    u['X_summ'] = 0.
-    u['X2_summ'] = 0.
-    u['count'] = 0
-    return u
-
-
-def add_to_stat_series(u,Value):
-    u['X_summ'] += Value
-    u['X2_summ'] += Value*Value
-    u['count'] +=1
-    
-def my_R_plot():
-    Iarr = my_fft_filtration(target_VCurrent)
-    Varr = my_fft_filtration(target_input_dummy)
-    Rarr = Varr/Iarr
-    plt.plot(Varr,Rarr)
-    plt.show()
-    
-def my_Sigma_plot():
-    Iarr = my_fft_filtration(target_VCurrent)
-    Varr = my_fft_filtration(target_input_dummy)
-    Sigma_arr = Iarr/Varr
-    #plt.plot(Varr,Sigma_arr)
-    plt.plot(Sigma_arr)
-    plt.show()
-    
-def my_Power_plot():
-    Iarr = my_fft_filtration(target_VCurrent)
-    Varr = my_fft_filtration(target_input_dummy)
-    Power_arr = Iarr*Varr
-    #plt.plot(Varr,Sigma_arr)
-    plt.plot(Power_arr)
-    plt.show()
-    
-def my_PowerPrime_plot():
-    Iarr = my_fft_filtration(target_VCurrent)
-    Varr = my_fft_filtration(target_input_dummy)
-    Power_arr = Iarr*Varr
-    #plt.plot(Varr,Sigma_arr)
-    prime_arr = Power_arr
-    for i in range(0,len(Power_arr)-1):
-        prime_arr[i] = Power_arr[i+1]-Power_arr[i]
-    plt.plot(prime_arr)
-    
-    plt.show()
-    
     
     
 # вывести на график результат моделирования
@@ -384,13 +314,17 @@ def analysis_plot(title='',pngName=''):
     plt.plot(target_input_dummy, target_VCurrent,color='red')
     # ВАХ результат подбора
     plt.plot(analysis.input_dummy, analysis.VCurrent,color='blue')  
-        
+    
+    s=''    
     if (not title==''):
        s = title
     elif not target_fileName=='':
        s = target_fileName
      
-    s = s+', misfit='+str(misfit_result)
+    #s = s+', misfit='+str(misfit_result)+', ivcmp='+str(ivcmp_result)
+   
+    s = s+', misfit='+ format(misfit_result,'0.5E')+', ivcmp='+format(ivcmp_result,'0.5E')
+    
     plt.title(s)
     
     plt.xlabel('Напряжение [В]')
@@ -400,25 +334,7 @@ def analysis_plot(title='',pngName=''):
         plt.savefig(pngName)
         
     plt.show()
-    
-    
-# вывести на график спектр сигнала
-def analysis_plotFFT():
-    #figure = plt.figure(1,(20,10))
-    plt.figure(1,(20,10))
-    plt.grid()
-    
-    S1 = scf.rfft(target_VCurrent)
-    plt.plot(np.abs(S1)[:30],color='red')
-    
-    S2 = scf.rfft(analysis.VCurrent)
-    plt.plot(np.abs(S2)[:30],color='blue')
-    
-    S = S2-S1
-    plt.plot(np.angle(S)[:30],color='yellow')
-    
-    plt.show()
-    
+        
 
 #### ФУНКЦИИ СРАВНЕНИЯ ВАХ ################################################### 
 def C_to_R(c):
@@ -430,17 +346,52 @@ def R_to_C(r):
     c = 1/(2.*np.pi*INIT_F*r)
     return c
 
+NORMA_misfit = 1.
+def analysis_misfit():
+    # суммирование без потери точности
+    return NORMA_misfit*math.fsum(analysis_misfit_core()) 
 
-def analysis_misfit_scalar():
-    return np.sum(analysis_misfit_core())
+def analysis_misfit_ivcmp():
+    step_IVCurve = analysis_to_IVCurve()
+    res = libivcmp.CompareIvc(target_IVCurve, step_IVCurve, MAX_NUM_POINTS)   
+    return res
+
+# вычислить несовпадение последнего анализа и целевой функции.
+def target_misfit_norma1():    
+    curr_t = target_VCurrent
+    volt_t = target_input_dummy
+    
+    if MISFIT_METHOD == 'power':
+        r = (curr_t*volt_t)
+        return math.fsum(r)
+    
+    if MISFIT_METHOD == 'power_fft':
+        r = scf.rfft(curr_t*volt_t)       
+        return math.fsum(r)
+    
+    if MISFIT_METHOD == 'sko':
+        r = (curr_t)        
+        r2 = np.abs(r)
+        return math.fsum(r2)
+    
+    if MISFIT_METHOD == 'sko_fft':
+        r = (curr_t)
+        r2 = scf.rfft(np.abs(r))
+        return math.fsum(r2)
+    
+    if MISFIT_METHOD == 'libivcmp':                
+        return 1. # для libivcmp норма не поддерживается
+    
+    s = "unknown MISFIT_METHOD = '"+str(MISFIT_METHOD)+"'"
+    raise RuntimeError(s)
 
 
 # вычислить несовпадение последнего анализа и целевой функции.
 def analysis_misfit_core():    
-    curr_t = my_fft_filtration(target_VCurrent)
-    curr_a = my_fft_filtration(analysis.VCurrent)
-    volt_t = my_fft_filtration(target_input_dummy)
-    volt_a = my_fft_filtration(analysis.input_dummy)
+    curr_t = target_VCurrent
+    curr_a = analysis.VCurrent
+    volt_t = target_input_dummy
+    volt_a = analysis.input_dummy
     
     if MISFIT_METHOD == 'power':
         r = (curr_t*volt_t-curr_a*volt_a)
@@ -451,23 +402,18 @@ def analysis_misfit_core():
         return r
     
     if MISFIT_METHOD == 'sko':
-        r = (curr_t-curr_a)
-        #r2 = r*r
+        r = (curr_t-curr_a)        
         r2 = np.abs(r)
         return r2
     
     if MISFIT_METHOD == 'sko_fft':
         r = (curr_t-curr_a)
-        r2 = r*r
+        r2 = np.abs(r)
         return scf.rfft(r2)
     
-    if MISFIT_METHOD == 'libivcmp':
-        if USE_FFT_FILTRATION:
-            s = "USE_FFT_FILTRATION=True incompatible with MISFIT_METHOD = 'libivcmp'"
-            raise RuntimeError(s)
-            
+    if MISFIT_METHOD == 'libivcmp':                
         step_IVCurve = analysis_to_IVCurve()
-        res = libivcmp.CompareIvc(target_IVCurve, step_IVCurve, libivcmp.MAX_NUM_POINTS)
+        res = libivcmp.CompareIvc(target_IVCurve, step_IVCurve, MAX_NUM_POINTS)
         r = np.array([res])
         return r
     
@@ -483,29 +429,17 @@ Xi_result = [0.,0.,0.,0., 0.,0.,0., 0.,0.,0.,0.]
 
 # текущий найденный минимум оптимизируемой функции 
 misfit_result = 0.
+# результат сравнения найденного минимума по функцией CompareIvc()
+ivcmp_result = 0.
 
 # счетчик числа вызовов функции оптимизатором
 FitterCount = 0
-
-# начать работать с решателем - сбросить счетчики, вывести инфо
-def init_fitter():
-    #print('\ninit_fitter : ')
-    global FitterCount
-    FitterCount = 0
-    
-
-# завершить работу с решателем - вывести инфо
-def report_fitter():
-    print('\nreport_fitter : ')
-    print('FitterCount = '+str(FitterCount))
-    print('Xi_result = '+str(Xi_result))
-    print('misfit = '+str(misfit_result))
-    
-
 BestMisfitCount = 0
+FITTER_SUCCESS = False
+
 # функция вызывается оптимизатором
 def fitter_subroutine(Xargs):
-    global Xi_result,misfit_result,FitterCount,BestMisfitCount
+    global Xi_result,misfit_result,FitterCount,BestMisfitCount,ivcmp_result
     FitterCount += 1
     
     xi = Xi_unroll(Xargs)
@@ -513,100 +447,46 @@ def fitter_subroutine(Xargs):
     generate_circuitFile_by_values(xi)
     process_circuitFile()
     
-    Mcore = analysis_misfit_core()
-    Mscalar = np.sum(np.abs(Mcore))
-    Mresult = Mcore
-    
-    if MISFIT_KIND=='minimize': # используем оптимизатор скалярной функции
-        Mresult = Mscalar
-    
-    
+    misfit = analysis_misfit()
+      
     #print("fCount="+str(FitterCount)+', misfit='+str(Mscalar)+', Xargs='+str(Xargs))
     # первый запуск
     if FitterCount<=1:
         Xi_result = xi.copy()
-        misfit_result = Mscalar
+        misfit_result = misfit
+        ivcmp_result = analysis_misfit_ivcmp()
         BestMisfitCount = 0
         #print("fCount="+str(FitterCount)+', mCount='+str(BestMisfitCount)+', misfit='+str(Mscalar)+', Xargs='+str(Xargs))
             
     # лучший случай
-    if Mscalar<misfit_result:
+    if misfit<misfit_result:
         Xi_result = xi.copy()
-        misfit_result = Mscalar
+        misfit_result = misfit
+        ivcmp_result = analysis_misfit_ivcmp()
         BestMisfitCount += 1
         #print("fCount="+str(FitterCount)+', mCount='+str(BestMisfitCount)+', misfit='+str(Mscalar)+', Xargs='+str(Xargs))
         
-    return Mresult # возвращаем вектор или скаляр
+    return misfit 
 
+# 
+def fitter_callback(Xk):
+    global FITTER_SUCCESS
+    if ivcmp_result<=IVCMP_TOLERANCE: # достигли необходимой точности       
+        FITTER_SUCCESS = True
+        return True
+    
+    return False    
 
-# запустить автоподбор
-def run_fitter(result_cir_file_name='',result_csv_file_name=''):       
-    if MISFIT_KIND == 'minimize': 
-        return run_fitter_minimize(result_cir_file_name='',result_csv_file_name='')  
-    if MISFIT_KIND == 'least_square':        
-        return run_fitter_sqleast(result_cir_file_name='',result_csv_file_name='') 
-         
-    s = "unknown MISFIT_KIND = '"+str(MISFIT_KIND)+"'"
-    raise RuntimeError(s)
     
-
-# запустить автоподбор - сравнение по набору точек         
-def run_fitter_sqleast(result_cir_file_name='',result_csv_file_name=''):    
-    global Xi_result,FitterCount             
-    print('\nrun_fitter\nXinit = ')
-    Xargs = Xi_pack(Xi_long)
-    #print('Xargs='+str(Xargs))    
-    #print('Xi_mask = '+str(Xi_mask))
-    
-    FitterCount = 0
-     
-    x_dif = np.array([1e1,1e1,1e1])
-    
-    min_bnds = Xargs.copy()
-    max_bnds = Xargs.copy()
-    
-    for i in range(len(min_bnds)):
-        min_bnds[i] =np.abs(min_bnds[i])
-        max_bnds[i] =np.abs(2.*max_bnds[i])
-    
-    #min_bnds = (-1e-1,-1e-1,-1e-1)
-    #max_bnds = (1e4,1e4,1e4)
-    
-    bnds = np.array((min_bnds,max_bnds))
-    
-    #resX = spo.least_squares(fitter_subroutine_sqleast,Xargs,bounds=bnds,xtol=None,ftol=TOLERANCE,gtol=None,diff_step=x_dif,max_nfev=1000)
-    resX = spo.least_squares(fitter_subroutine,Xargs,jac='3-point',bounds=bnds,method='dogbox',xtol=None,ftol=TOLERANCE,gtol=None,diff_step=x_dif,tr_solver='lsmr',max_nfev=1000)
-    
-    
-    print(resX.message)
-      
-    X = resX.x
-    Xi_result = Xi_unroll(X)
-    print('FitterCount='+str(FitterCount))
-    # вызываем с результатом оптимизации, ибо предыдущий вызов может быть неоптимальным
-    generate_circuitFile_by_values(Xi_result)
-    process_circuitFile()
-              
-    if(not result_csv_file_name==''):
-        spice.SaveFile(analysis, result_csv_file_name)
-    if(not result_cir_file_name==''):          
-        generate_circuitFile_by_values(resX.x)
-    
-    return True
-
 
 # запустить автоподбор - сравнение по сумме отклонений точек         
-def run_fitter_minimize(result_cir_file_name='',result_csv_file_name=''):                 
-    # print('\nrun_fitter\nXinit = ')
+def run_fitter(result_cir_file_name='',result_csv_file_name=''):                 
     Xargs = Xi_pack(Xi_long)
     
     for i in range(0,len(Xargs)):
         Xargs[i] = 0.
        
-    resX = spo.minimize(fitter_subroutine,Xargs,method=FITTER_METHOD,tol=TOLERANCE,options={'maxiter':1000})   
-    # вызываем с результатом оптимизации, ибо предыдущий вызов может быть неоптимальным
-    # generate_circuitFile_by_values(Xi_result)
-    # process_circuitFile()  
+    resX = spo.minimize(fitter_subroutine,Xargs,method='Powell',callback=fitter_callback,options={'maxiter':1000,'xtol':1e-2})    
               
     if(not result_csv_file_name==''):
         spice.SaveFile(analysis, result_csv_file_name)
@@ -720,12 +600,16 @@ def Sch_init_by_approximation(sch):
         sch['C2'] = C2
         
     
-   
-    
 def init_target_by_Sch(sch):
+    global NORMA_misfit
     generate_circuitFile_by_values(Sch_get_Xi(sch))
-    init_target_by_circuitFile()    
+    init_target_by_circuitFile()  
     
+    try:
+        NORMA_misfit=1./target_misfit_norma1()
+    except ArithmeticError:
+        NORMA_misfit=1.
+            
         
 ############################################################################# 
 def Session_create(start_sch):
@@ -735,9 +619,10 @@ def Session_create(start_sch):
 
 
 def Session_run(session):
+    global FitterCount
+    FitterCount = 0
     sch = session['start_sch']
     var_list = session['Xi_variable']
-    init_fitter()
     set_circuit_nominals(Sch_get_Xi(sch))
     set_Xi_variable(var_list)
     run_fitter()
@@ -830,6 +715,8 @@ def Session_set_switchers(session, swcode):
     
     
 def Session_processAll():
+    global FITTER_SUCCESS
+    FITTER_SUCCESS = False
     ses_result = None
     best_misfit = 1e9
     
@@ -850,27 +737,54 @@ def Session_processAll():
             print('misfit = '+str(best_misfit))
             print(ses['result_sch'])           
             analysis_plot()
-                    
-    # Session_run(ses_result)
-    # analysis_plot()
-    
+            if FITTER_SUCCESS:
+                return
+                         
     
 #############################################################################
 
+def odd_part(data):
+    s = len(data)
+    x = np.copy(data)
+    for i in range(s):
+        x[i] = (data[i]-data[s-i-1])/2.
+    return x
 
+def non_odd_part(data):
+    s = len(data)
+    x = np.copy(data)
+    for i in range(s):
+        x[i] = (data[i]+data[s-i-1])/2.
+    return x
+
+        
 def test1():
     sch = Sch_init()
-    sch['R1'] = 1e-2
-    sch['C1'] = 1e-5
-    sch['_R_C1'] = HUGE_R
+    sch['R1'] = 1e3
+    # sch['C1'] = 1e-5
+    # sch['_R_C1'] = HUGE_R
     sch['R2'] = 1e2
     # sch['_R_C2'] = HUGE_R
-    # sch['C2'] = 1e-5
+    # sch['C2'] = 1e-7
     # sch['C3'] = 1.3e-6
     # sch['_R_C3'] = HUGE_R
-    sch['R3'] = 1e3
+    # sch['R3'] = 2e3
     init_target_by_Sch(sch)
     Session_processAll()
+    # a1 = odd_part(target_VCurrent)
+    # a2 = non_odd_part(target_VCurrent)
+    # plt.figure(1, (20, 10))
+    # plt.grid()
+    # plt.plot(a1)
+    # plt.plot(a2)
+    # plt.plot(a1+a2)
+    # plt.show()
+    
+    # s1 = scs.convolve(target_VCurrent,a1)
+    # plt.plot(s1)
+    # s2 = scs.correlate(target_VCurrent,a2)
+    # plt.plot(s2)
+    # plt.show()
 
 
 def test2():
@@ -897,8 +811,8 @@ def test3():
     sch['C2'] = 1e-7
     # sch['C3'] = 1.3e-6
     # sch['_R_C3'] = HUGE_R
-    # sch['R3'] = 1e-3
-    init_target_by_Sch(sch)
+    # sch['R3'] = 1e-3   
+    init_target_by_Sch(sch)    
     Session_processAll()
     
 
@@ -923,18 +837,23 @@ def test_data(csv_data):
 def test_data1(csv_data):
     init_target_from_csvFile(csv_data)
     #analysis_plot()
-    plt.plot(target_input_dummy)
-    plt.text(75,0.5,'text\ntext2')
+    sch0 = Sch_init()
+    Sch_init_by_approximation(sch0)
+    ses = Session_create(sch0)
+    Session_set_switchers(ses,100)
+    Session_run(ses)
+    
     plt.show()  
     
 def main(): 
+    libivcmp.set_MAX_NUM_POINTS(MAX_NUM_POINTS)
     #init_target_from_csvFile('пример1.csv')
-    # test1()
+    test1()
     # test2()
     # test3()
     # test4()
     #test_data1('пример3.csv')
-    test_data('test_data2.csv')
+    #test_data('test_data2.csv')
     # test_data('test_data3.csv')
     
     

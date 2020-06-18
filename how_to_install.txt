@@ -7,7 +7,7 @@
 2. numpy - [ pip install numpy ]
 3. scipy - [ pip install scipy ]
 4. matplotlib - [pip install matplotlib ]
-6. MySpice - инструкции по установке https://github.com/LukyanovM/MySpice
+5. MySpice - инструкции по установке https://github.com/LukyanovM/MySpice
 6*. PySpice - иструкции по установке https://github.com/FabriceSalvaire/PySpice
 6**. ngspice - инструкции по установке см. п 5.
 
@@ -17,5 +17,5 @@
   
 сама программа - теперь один файл.  
 vs_circuit_solver.py                
-
-запускать где угодно, я запускал из среды разработки spyder                 
+программа создает на диске файл var1.cir для обмена с MySpice
+               
