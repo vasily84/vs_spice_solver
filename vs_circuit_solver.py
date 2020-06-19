@@ -22,6 +22,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from ctypes import c_double
 import csv
+import json
 # внешние модули
 import MySpice as spice
 import libivcmp
@@ -32,6 +33,7 @@ import libivcmp
 # метод сравнения кривых тока и напряжения
 # может быть : 'libivcmp','sko','sko_fft','power','power_fft'
 MISFIT_METHOD = 'sko'
+#MISFIT_METHOD = 'libivcmp'
 
 # частота, Гц
 INIT_F = 1e3
@@ -42,7 +44,7 @@ INIT_V = 2.5
 INIT_Rcs = 0.47
 
 # SIGNAL/NOISE ratio
-INIT_SNR = 135.0
+INIT_SNR = 125.0
 
 # число циклов колебаний напряжения в записи
 INIT_CYCLE = 5
@@ -599,6 +601,12 @@ def Sch_init_by_approximation(sch):
         sch['_R_C3'] = HUGE_R
         sch['C2'] = C2
         
+def Sch_saveToFile(sch,fileName):
+    try:
+        newF = open(fileName, 'w')
+        json.dump(sch,newF)
+    finally:           
+        newF.close()
     
 def init_target_by_Sch(sch):
     global NORMA_misfit
@@ -714,7 +722,7 @@ def Session_set_switchers(session, swcode):
     session['Xi_variable'] = var_list  
     
     
-def Session_processAll():
+def Session_processAll(fileName='result.txt'):
     global FITTER_SUCCESS
     FITTER_SUCCESS = False
     ses_result = None
@@ -738,7 +746,11 @@ def Session_processAll():
             print(ses['result_sch'])           
             analysis_plot()
             if FITTER_SUCCESS:
+                print('FITTER_SUCCESS!!')
+                Sch_saveToFile(ses['result_sch'], fileName)
                 return
+            
+    Sch_saveToFile(ses_result, fileName)
                          
     
 #############################################################################
@@ -770,22 +782,8 @@ def test1():
     # sch['_R_C3'] = HUGE_R
     # sch['R3'] = 2e3
     init_target_by_Sch(sch)
-    Session_processAll()
-    # a1 = odd_part(target_VCurrent)
-    # a2 = non_odd_part(target_VCurrent)
-    # plt.figure(1, (20, 10))
-    # plt.grid()
-    # plt.plot(a1)
-    # plt.plot(a2)
-    # plt.plot(a1+a2)
-    # plt.show()
+    Session_processAll('test1.txt')
     
-    # s1 = scs.convolve(target_VCurrent,a1)
-    # plt.plot(s1)
-    # s2 = scs.correlate(target_VCurrent,a2)
-    # plt.plot(s2)
-    # plt.show()
-
 
 def test2():
     sch = Sch_init()
@@ -799,7 +797,7 @@ def test2():
     # sch['_R_C3'] = HUGE_R
     sch['R3'] = 1e3
     init_target_by_Sch(sch)
-    Session_processAll()
+    Session_processAll('test2.txt')
 
 def test3():
     sch = Sch_init()
@@ -812,11 +810,11 @@ def test3():
     # sch['C3'] = 1.3e-6
     # sch['_R_C3'] = HUGE_R
     # sch['R3'] = 1e-3   
-    init_target_by_Sch(sch)    
-    Session_processAll()
+    init_target_by_Sch(sch) 
+    Session_processAll('test3.txt')
     
 
-def test4():
+def test4(): 
     sch = Sch_init()
     # sch['R1'] = 1e2
     # sch['C1'] = 1e-5
@@ -827,34 +825,42 @@ def test4():
     # sch['C3'] = 1.3e-6
     # sch['_R_C3'] = HUGE_R
     sch['R3'] = 1e3
-    init_target_by_Sch(sch)
-    Session_processAll()
+    init_target_by_Sch(sch) 
+    Session_processAll('test4.txt')
     
-def test_data(csv_data):
+def test5(): 
+    sch = Sch_init()
+    sch['R1'] = 1e2
+    sch['C1'] = NONE_C
+    sch['_R_C1'] = NULL_R
+    sch['_R_D1'] = NULL_R
+    
+    sch['R2'] = NULL_R
+    sch['_R_C2'] = HUGE_R
+    sch['C2'] = 1e-7
+    # sch['C3'] = 1.3e-6
+    # sch['_R_C3'] = HUGE_R
+    # sch['R3'] = 1e3
+    init_target_by_Sch(sch) 
+    Session_processAll('test5.txt')
+    
+def test_data(csv_data,fileName='result.txt'):
     init_target_from_csvFile(csv_data)
-    Session_processAll()
+    Session_processAll(fileName)
 
-def test_data1(csv_data):
-    init_target_from_csvFile(csv_data)
-    #analysis_plot()
-    sch0 = Sch_init()
-    Sch_init_by_approximation(sch0)
-    ses = Session_create(sch0)
-    Session_set_switchers(ses,100)
-    Session_run(ses)
-    
-    plt.show()  
+ 
     
 def main(): 
     libivcmp.set_MAX_NUM_POINTS(MAX_NUM_POINTS)
     #init_target_from_csvFile('пример1.csv')
     test1()
-    # test2()
-    # test3()
-    # test4()
-    #test_data1('пример3.csv')
-    #test_data('test_data2.csv')
-    # test_data('test_data3.csv')
+    test2()
+    test3()
+    test4()
+    # test5()
+    # test_data('пример3.csv','пример3.txt')
+    # test_data('test_data2.csv','test_data2.txt')
+    # test_data('test_data3.csv','test_data3.txt')
     
     
 if __name__=='__main__':
