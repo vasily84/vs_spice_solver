@@ -7,7 +7,7 @@
 # поставляется без всякой оптимизации, ибо имеет целью установление методики 
 # расчета таких вещей и определения границ применимости этой методики
 #
-# автор В.Симонов, 18-июнь-2020
+# автор В.Симонов, 30-июнь-2020
 # vasily_simonov@mail.ru, github.com/vasily84
 #
 # license : это модуль в любом виде можно использовать в любых целях. 
@@ -26,14 +26,16 @@ import json
 # внешние модули
 import MySpice as spice
 import libivcmp
+import numpy
 
+#from PySpice.Spice.Netlist import Circuit, SubCircuitFactory
 
 ### SETTINGS ################################################################
 
 # метод сравнения кривых тока и напряжения
 # может быть : 'libivcmp','sko','sko_fft','power','power_fft'
-MISFIT_METHOD = 'sko'
-#MISFIT_METHOD = 'libivcmp'
+#MISFIT_METHOD = 'sko'
+MISFIT_METHOD = 'libivcmp'
 
 # частота, Гц
 INIT_F = 1e3
@@ -41,13 +43,13 @@ INIT_F = 1e3
 INIT_V = 2.5
 
 # токоограничивающий резистор, Ом
-INIT_Rcs = 0.47
+INIT_Rcs = 4.7e-5
 
 # SIGNAL/NOISE ratio
-INIT_SNR = 125.0
+INIT_SNR = 135.0
 
 # число циклов колебаний напряжения в записи
-INIT_CYCLE = 5
+INIT_CYCLE = 3
 
 # падение напряжения на диоде
 # Диод считается полностью проводимым при напряжении больше чем DIODE_VOLTAGE,
@@ -68,17 +70,22 @@ NONE_C = 1e-15 # 0.001 пФ
  
 # погрешность подбора кривых- критерий остановки. Подбор длится до тех пор, 
 # пока функция сравнения не вернет значение CompareIvc()<=IVCMP_TOLERANCE     
-IVCMP_TOLERANCE = 1e-8
+IVCMP_TOLERANCE = 2e-1
 
 # погрешность подбора номиналов в процентах. Номиналы емкостей считаются по 
 # реактивному сопротивлению!. Подробности см. scipy.minimize(method='Powell')
-VALUES_TOLERANCE = 1e-2
+VALUES_TOLERANCE = 1e-3
 
+# число вычислений функции в процессе оптимизации. При малых значениях-
+# минимально возможное число
+MAXFEV = 100
 
 # число точек в массивах тока и напряжения, может измениться при загрузке 
 # внешнего файла данных
-MAX_NUM_POINTS = 500
+MAX_NUM_POINTS = 100
 
+
+min_ivc = 1 
 #############################################################################
 
 # результат последненго моделирования в PySpice
@@ -229,11 +236,14 @@ def init_target_from_csvFile(fileName):
 
     iv_curve = libivcmp.IvCurve()
     for i in range(MAX_NUM_POINTS):
-        iv_curve.voltages[i] = c_double(target_VCurrent[i])
-        iv_curve.currents[i] = c_double(target_input_dummy[i])
+        iv_curve.voltages[i] = c_double(target_input_dummy[i]) # Ток и напряжение были поменяны местами
+        iv_curve.currents[i] = c_double(target_VCurrent[i])
     
-    libivcmp.SetMinVC(0, 0)
-    libivcmp.set_MAX_NUM_POINTS(MAX_NUM_POINTS)
+    min_var_c = 0.01 * np.max(iv_curve.currents[:MAX_NUM_POINTS]) # value of noise for current
+    min_var_v = 0.01 * np.max(iv_curve.voltages[:MAX_NUM_POINTS]) # value of noise for voltage
+    libivcmp.SetMinVC(min_var_v, min_var_c) # Правильные значения фильтров для корректной работы
+    
+    # libivcmp.set_MAX_NUM_POINTS(MAX_NUM_POINTS) # В некоторых случаях искажает работу модуля
     target_IVCurve = iv_curve
     
     try:
@@ -252,10 +262,14 @@ def Xi_to_RC(Xi):
     
     return RC
 
-    
+circuit = None
+
 # в наборе строк шаблона схемы сделать замену {} на значения 
 # варьирования Xi_values, сохранить заданным с именем
 def generate_circuitFile_by_values( Xi_values):
+    # if circuit is not None:
+    #     return
+    
     fileCircuit = circuit_SessionFileName
     #print('\ngenerate_circuitFile_by_values()\n'+str(Xi_values)) 
     newF = open(fileCircuit, 'w')
@@ -271,29 +285,57 @@ def generate_circuitFile_by_values( Xi_values):
         newF.write(cStr)
     newF.close()
 
-        
+  
 # промоделировать файл схемы
-def process_circuitFile(csvName=''):
-    global analysis
+def process_circuitFile(csvName='',xi=None):
+    global analysis,circuit
     del(analysis) # необходимо
-    fileName=circuit_SessionFileName
     
-    circuit = spice.LoadFile(fileName)
     input_data = spice.Init_Data(INIT_F, INIT_V, INIT_Rcs,INIT_SNR )
+    
+    # if circuit is None:
+    circuit = spice.LoadFile(circuit_SessionFileName)
     analysis = spice.CreateCVC1(circuit, input_data, MAX_NUM_POINTS, "input", INIT_CYCLE)   
+    # else:
+    #     circuit_SetValues(xi)    
+    #     analysis = spice.CreateCVC1_rcs(circuit, input_data, MAX_NUM_POINTS, "input", INIT_CYCLE)   
     
     if(not csvName==''):
         spice.SaveFile(analysis, csvName)
  
 
+def circuit_SetValues( Xi_values):
+    global circuit
+    rc_values = Xi_to_RC(Xi_values)
+    
+    circuit.R1.resistance = np.abs(rc_values[0])
+    circuit.C1.capacitance = np.abs(rc_values[1])
+    circuit.R_C1.resistance = np.abs(rc_values[2])
+    circuit.R_D1.resistance = np.abs(rc_values[3])
+    
+    circuit.R2.resistance = np.abs(rc_values[4])
+    circuit.C2.capacitance = np.abs(rc_values[5])
+    circuit.R_C2.resistance = np.abs(rc_values[6])
+    
+    circuit.R3.resistance = np.abs(rc_values[7])
+    circuit.C3.capacitance = np.abs(rc_values[8])
+    circuit.R_C3.resistance = np.abs(rc_values[9])
+    circuit.R_D3.resistance = np.abs(rc_values[10])  
+    return 
+
+    
 # последний анализ перевести в форму, пригодную для сравнения в libivcmp
+iv_curve = None
 def analysis_to_IVCurve():
-    iv_curve = libivcmp.IvCurve()
-    for i in range(MAX_NUM_POINTS):
-        iv_curve.voltages[i] = c_double(analysis.VCurrent[i])
-        iv_curve.currents[i] = c_double(analysis.input_dummy[i])
+    global iv_curve
+    if iv_curve is None:    
+        iv_curve = libivcmp.IvCurve()
         
-    libivcmp.SetMinVC(0, 0)
+    for i in range(MAX_NUM_POINTS):
+        iv_curve.voltages[i] = c_double(analysis.input_dummy[i])
+        iv_curve.currents[i] = c_double(analysis.VCurrent[i])
+        
+    # libivcmp.SetMinVC(0.1, 1e-5)
     return iv_curve
     
 
@@ -354,8 +396,12 @@ def analysis_misfit():
     return NORMA_misfit*math.fsum(analysis_misfit_core()) 
 
 def analysis_misfit_ivcmp():
+    global min_ivc
     step_IVCurve = analysis_to_IVCurve()
     res = libivcmp.CompareIvc(target_IVCurve, step_IVCurve, MAX_NUM_POINTS)   
+    if min_ivc > res:
+        min_ivc = res
+    #print(res, min_ivc)
     return res
 
 # вычислить несовпадение последнего анализа и целевой функции.
@@ -446,8 +492,10 @@ def fitter_subroutine(Xargs):
     
     xi = Xi_unroll(Xargs)
     
+    #if circuit is None:
     generate_circuitFile_by_values(xi)
-    process_circuitFile()
+    #print(xi)
+    process_circuitFile('',xi)
     
     misfit = analysis_misfit()
       
@@ -479,7 +527,6 @@ def fitter_callback(Xk):
     
     return False    
 
-    
 
 # запустить автоподбор - сравнение по сумме отклонений точек         
 def run_fitter(result_cir_file_name='',result_csv_file_name=''):                 
@@ -487,8 +534,8 @@ def run_fitter(result_cir_file_name='',result_csv_file_name=''):
     
     for i in range(0,len(Xargs)):
         Xargs[i] = 0.
-       
-    resX = spo.minimize(fitter_subroutine,Xargs,method='Powell',callback=fitter_callback,options={'maxiter':1000,'xtol':1e-2})    
+    
+    resX = spo.minimize(fitter_subroutine,Xargs,method='Powell',callback=fitter_callback,options={'maxfev':MAXFEV,'xtol':VALUES_TOLERANCE})    
               
     if(not result_csv_file_name==''):
         spice.SaveFile(analysis, result_csv_file_name)
@@ -744,12 +791,15 @@ def Session_processAll(fileName='result.txt'):
             print('\nswcode = '+str(swcode))
             print('misfit = '+str(best_misfit))
             print(ses['result_sch'])           
-            analysis_plot()
+            #analysis_plot()
             if FITTER_SUCCESS:
-                print('FITTER_SUCCESS!!')
+                print(ses['result_sch'])           
+                analysis_plot()
+                print('FITTER_SUCCESS!!\nmisfit = '+str(best_misfit))
                 Sch_saveToFile(ses['result_sch'], fileName)
                 return
-            
+
+    print('FITTER routine usuccessfull\nmisfit = '+str(best_misfit))        
     Sch_saveToFile(ses_result, fileName)
                          
     
@@ -782,6 +832,7 @@ def test1():
     # sch['_R_C3'] = HUGE_R
     # sch['R3'] = 2e3
     init_target_by_Sch(sch)
+    print('test1()')
     Session_processAll('test1.txt')
     
 
@@ -797,6 +848,7 @@ def test2():
     # sch['_R_C3'] = HUGE_R
     sch['R3'] = 1e3
     init_target_by_Sch(sch)
+    print('test2()')
     Session_processAll('test2.txt')
 
 def test3():
@@ -811,6 +863,7 @@ def test3():
     # sch['_R_C3'] = HUGE_R
     # sch['R3'] = 1e-3   
     init_target_by_Sch(sch) 
+    print('test3()')
     Session_processAll('test3.txt')
     
 
@@ -826,6 +879,7 @@ def test4():
     # sch['_R_C3'] = HUGE_R
     sch['R3'] = 1e3
     init_target_by_Sch(sch) 
+    print('test4()')
     Session_processAll('test4.txt')
     
 def test5(): 
@@ -842,25 +896,37 @@ def test5():
     # sch['_R_C3'] = HUGE_R
     # sch['R3'] = 1e3
     init_target_by_Sch(sch) 
+    print('test5()')
     Session_processAll('test5.txt')
     
 def test_data(csv_data,fileName='result.txt'):
+    print('\n')
+    print(csv_data)
     init_target_from_csvFile(csv_data)
+    # plt.plot(target_VCurrent)
+    # plt.show()
+    # plt.plot(target_input_dummy)
+    # plt.show()
     Session_processAll(fileName)
 
  
     
 def main(): 
-    libivcmp.set_MAX_NUM_POINTS(MAX_NUM_POINTS)
+    #libivcmp.set_MAX_NUM_POINTS(100)
     #init_target_from_csvFile('пример1.csv')
-    test1()
-    test2()
-    test3()
-    test4()
+    # test1()
+    # test2()
+    # test3()
+    # test4()
     # test5()
-    # test_data('пример3.csv','пример3.txt')
-    # test_data('test_data2.csv','test_data2.txt')
-    # test_data('test_data3.csv','test_data3.txt')
+    # return 
+    test_data('пример3.csv','пример3.txt')
+    test_data('test_nores.csv')
+    test_data('test_rc.csv')
+    test_data('test_rcd.csv')
+    test_data('test_rcd_no.csv')
+    test_data('test_rcd_rcd.csv')
+    test_data('test_rd_ii_c.csv')
     
     
 if __name__=='__main__':
