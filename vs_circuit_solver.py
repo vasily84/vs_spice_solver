@@ -28,7 +28,6 @@ import MySpice as spice
 import libivcmp
 import numpy
 
-from PySpice.Spice.Netlist import Circuit, SubCircuitFactory
 
 ### SETTINGS ################################################################
 
@@ -76,15 +75,15 @@ NONE_C = 1e-15 # 0.001 пФ
  
 # погрешность подбора кривых- критерий остановки. Подбор длится до тех пор, 
 # пока функция сравнения не вернет значение CompareIvc()<=IVCMP_TOLERANCE     
-IVCMP_TOLERANCE = 2e-1
+IVCMP_TOLERANCE = 5e-2
 
 # погрешность подбора номиналов в процентах. Номиналы емкостей считаются по 
 # реактивному сопротивлению!. Подробности см. scipy.minimize(method='Powell')
-VALUES_TOLERANCE = 1e-3
+VALUES_TOLERANCE = 1e-2
 
 # число вычислений функции в процессе оптимизации. При малых значениях-
 # минимально возможное число
-MAXFEV = 1
+MAXFEV = 10
 
 # число точек в массивах тока и напряжения, может измениться при загрузке 
 # внешнего файла данных
@@ -267,8 +266,8 @@ def Xi_to_RC(Xi):
 # в наборе строк шаблона схемы сделать замену {} на значения 
 # варьирования Xi_values, сохранить заданным с именем
 def generate_circuitFile_by_values( Xi_values):
+
     newF = open(circuit_SessionFileName, 'w')
-    
     rc_values = Xi_to_RC(Xi_values)
     
     newF.write('* cir file corresponding to the equivalent circuit.\n')
@@ -313,50 +312,19 @@ def generate_circuitFile_by_values( Xi_values):
     newF.write('.END')     
     newF.close()
 
-  
+input_data = None
 # промоделировать файл схемы
-def process_circuitFile(csvName=''):
-    global analysis
-    del(analysis) # необходимо
+def process_circuitFile():
+    global analysis,input_data
+    #del(analysis) # необходимо
     
-    input_data = spice.Init_Data(INIT_F, INIT_V, INIT_Rcs,INIT_SNR )
-    
+    if input_data is None:
+        input_data = spice.Init_Data(INIT_F, INIT_V, INIT_Rcs,INIT_SNR )
+        
     circuit = spice.LoadFile(circuit_SessionFileName)
     analysis = spice.CreateCVC1(circuit, input_data, MAX_NUM_POINTS, "input", INIT_CYCLE)   
     
-    if(not csvName==''):
-        spice.SaveFile(analysis, csvName)
- 
-
-# def create_circuit_by_values( Xi_values):
-#     rc_values = Xi_to_RC(Xi_values)
-#     circuit = Circuit('Test')
-#     #* cir file corresponding to the equivalent circuit.
-    
-#     #* Цепь 1
-#     circuit.R(1,'_net1','Input',rc_values[0]) #'R1 _net1 Input {}\n',
-#     circuit.C(1,'_net0','_net1',rc_values[1]) #'C1 _net0 _net1 {}\n',
-#     circuit.R('_C1','_net0','_net1',rc_values[2]) #'R_C1 _net0 _net1 {}\n',
-#     'D1 _net0 0 DMOD_D1 AREA=1.0 Temp=26.85\n',
-#     circuit.R('_D1',0,'_net0',rc_values[3]) #'R_D1 0 _net0 {}\n',
-    
-#     #* Цепь 2
-#     circuit.R(2,'_net4','Input',rc_values[4]) #'R2 _net4 Input {}\n',
-#     circuit.C(2,0,'_net4',rc_values[5]) #C2 0 _net4 {}\n',
-#     circuit.R('_C2',0,'_net4',rc_values[6]) #'R_C2 0 _net4 {}\n',
-    
-#     #* Цепь 3
-#     circuit.R(3,'_net3','Input',rc_values[7]) #'R3 _net3 Input {}\n',
-#     circuit.C(3,'_net2','_net3',rc_values[8]) #'C3 _net2 _net3 {}\n',
-#     circuit.R('_C3','_net2','_net3',rc_values[9]) #'R_C3 _net2 _net3 {}\n',
-#     'D3 0 _net2 DMOD_D1 AREA=1.0 Temp=26.85\n',
-#     circuit.R('_D3',0,'_net2',rc_values[10]) #'R_D3 0 _net2 {}\n',
-#     '.MODEL DMOD_D1 D (Is=2.22e-10 N=1.65 Cj0=4e-12 M=0.333 Vj=0.7 Fc=0.5 Rs=0.0686 Tt=5.76e-09 Ikf=0 Kf=0 Af=1 Bv=75 Ibv=1e-06 Xti=3 Eg=1.11 Tcv=0 Trs=0 Ttt1=0 Ttt2=0 Tm1=0 Tm2=0 Tnom=26.85 )\n',
-#     '.END'
-    
-#     return circuit
-
-    
+        
 # последний анализ перевести в форму, пригодную для сравнения в libivcmp
 iv_curve = None
 def analysis_to_IVCurve():
@@ -368,7 +336,6 @@ def analysis_to_IVCurve():
         iv_curve.voltages[i] = c_double(analysis.input_dummy[i])
         iv_curve.currents[i] = c_double(analysis.VCurrent[i])
         
-    # libivcmp.SetMinVC(0.1, 1e-5)
     return iv_curve
     
 
@@ -383,7 +350,6 @@ def V_div_I(v,i):
     
 # вывести на график результат моделирования
 def analysis_plot(title='',pngName=''):
-    #figure1 = plt.figure(1, (20, 10))
     plt.figure(1, (20, 10))
     plt.grid()
     
@@ -517,20 +483,19 @@ FitterCount = 0
 BestMisfitCount = 0
 FITTER_SUCCESS = False
 
+def calculate_misfit(Xi):
+    generate_circuitFile_by_values(Xi)
+    process_circuitFile()
+    misfit = analysis_misfit()
+    return misfit
+
 # функция вызывается оптимизатором
 def fitter_subroutine(Xargs):
     global Xi_result,misfit_result,FitterCount,BestMisfitCount,ivcmp_result
     FitterCount += 1
-    
     xi = Xi_unroll(Xargs)
+    misfit = calculate_misfit(xi)
     
-    #if circuit is None:
-    generate_circuitFile_by_values(xi)
-    #print(xi)
-    process_circuitFile('')
-    
-    misfit = analysis_misfit()
-      
     #print("fCount="+str(FitterCount)+', misfit='+str(Mscalar)+', Xargs='+str(Xargs))
     # первый запуск
     if FitterCount<=1:
@@ -704,11 +669,28 @@ def Session_create(start_sch):
     s['start_sch'] = start_sch
     return s
 
-
-def Session_run(session):
+# выполнить схему один раз
+def Session_run1(session):
+    try:
+        sch = session['result_sch']
+    except KeyError:
+        sch = session['start_sch']
+    
+    xi = Sch_get_Xi(sch)
+    set_circuit_nominals(xi)
+    calculate_misfit(xi)
+        
+# запустить подбор для сессии
+def Session_run_fitter(session):
     global FitterCount
     FitterCount = 0
-    sch = session['start_sch']
+    try:
+        sch = session['result_sch']
+    except KeyError:
+        sch = session['start_sch']
+    else:
+        session['start_sch']=sch
+        
     var_list = session['Xi_variable']
     set_circuit_nominals(Sch_get_Xi(sch))
     set_Xi_variable(var_list)
@@ -716,11 +698,12 @@ def Session_run(session):
     sch2 = Sch_init()
     Sch_load_from_Xi(sch2, Xi_result)
     session['result_sch'] = sch2
+    
     session['misfit'] = misfit_result
     session['fCount'] = FitterCount
     session['mCount'] = BestMisfitCount
    
-    
+
 # проверить, имеет ли смысл такая установка переключателей в схеме
 def is_valid_switchers(swcode):  
     if swcode & (1+2+3): # все ветви заглушены
@@ -801,10 +784,23 @@ def Session_set_switchers(session, swcode):
     session['Xi_variable'] = var_list  
     
     
+def set_fitter_profile(p):
+    global VALUES_TOLERANCE,MAXFEV
+    if p==1:
+        return 
+    if p==2:
+        return 
+    #умолчания
+    VALUES_TOLERANCE = 1e-2
+    MAXFEV = 10
+    return
+    
+    
+    
 def Session_processAll(fileName='result.txt'):
     global FITTER_SUCCESS
     FITTER_SUCCESS = False
-    ses_result = None
+    best_ses = None
     best_misfit = 1e9
     
     for swcode in range(255):
@@ -815,42 +811,30 @@ def Session_processAll(fileName='result.txt'):
         Sch_init_by_approximation(sch0)
         ses = Session_create(sch0)
         Session_set_switchers(ses,swcode)
-        Session_run(ses)
+        Session_run_fitter(ses)
+        
         if(ses['misfit']<best_misfit):
             best_misfit = ses['misfit']
-            ses_result = Session_create(ses['result_sch'])
-            Session_set_switchers(ses_result,swcode)
+            best_ses = ses
+            #sch_result = Session_create(ses['result_sch'])
+            #Session_set_switchers(sch_result,swcode)
             print('\nswcode = '+str(swcode))
             print('misfit = '+str(best_misfit))
             print(ses['result_sch'])           
-            analysis_plot()
+            #analysis_plot()
             if FITTER_SUCCESS:
                 print(ses['result_sch'])           
-                analysis_plot()
+                analysis_plot('FITTER SUCCESS')
                 print('FITTER_SUCCESS!!\nmisfit = '+str(best_misfit))
                 Sch_saveToFile(ses['result_sch'], fileName)
                 return
 
-    print('FITTER routine usuccessfull\nmisfit = '+str(best_misfit))        
-    Sch_saveToFile(ses_result, fileName)
-                         
+    print('FITTER routine unsuccessfull\nmisfit = '+str(best_misfit))   
+    Sch_saveToFile(best_ses['result_sch'], fileName)
+    Session_run1(best_ses)
+    analysis_plot('FITTER routine unsuccessfull')
     
 #############################################################################
-
-def odd_part(data):
-    s = len(data)
-    x = np.copy(data)
-    for i in range(s):
-        x[i] = (data[i]-data[s-i-1])/2.
-    return x
-
-def non_odd_part(data):
-    s = len(data)
-    x = np.copy(data)
-    for i in range(s):
-        x[i] = (data[i]+data[s-i-1])/2.
-    return x
-
         
 def test1():
     sch = Sch_init()
@@ -946,17 +930,17 @@ def test_data(csv_data,fileName='result.txt'):
 def main(): 
     #libivcmp.set_MAX_NUM_POINTS(100)
     #init_target_from_csvFile('пример1.csv')
-    test1()
-    test2()
-    test3()
-    test4()
-    test5()
+    # test1()
+    # test2()
+    # test3()
+    # test4()
+    # test5()
     # return 
     # test_data('пример3.csv','пример3.txt')
     # test_data('test_nores.csv')
     # test_data('test_rc.csv')
-    # test_data('test_rcd.csv')
-    # test_data('test_rcd_no.csv')
+    test_data('test_rcd.csv')
+    test_data('test_rcd_no.csv')
     # test_data('test_rcd_rcd.csv')
     # test_data('test_rd_ii_c.csv')
     
