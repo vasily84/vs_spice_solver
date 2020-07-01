@@ -28,7 +28,7 @@ import MySpice as spice
 import libivcmp
 import numpy
 
-#from PySpice.Spice.Netlist import Circuit, SubCircuitFactory
+from PySpice.Spice.Netlist import Circuit, SubCircuitFactory
 
 ### SETTINGS ################################################################
 
@@ -62,8 +62,14 @@ SMALL_VOLTAGE = 0.1
 # "огромное сопротивление".
 HUGE_R = 1e10 # 10 ГОм
 
+# "большое сопротивление"
+BIG_R = 1e8 # 100 МОм
+ 
 # "мизерное сопротивление"
 NULL_R = 1e-6 # 1 мкОм
+
+# "малое сопротивление"
+SMALL_R = 1e-4 # 100 мкОм
 
 # "мизерная емкость"
 NONE_C = 1e-15 # 0.001 пФ
@@ -78,7 +84,7 @@ VALUES_TOLERANCE = 1e-3
 
 # число вычислений функции в процессе оптимизации. При малых значениях-
 # минимально возможное число
-MAXFEV = 100
+MAXFEV = 1
 
 # число точек в массивах тока и напряжения, может измениться при загрузке 
 # внешнего файла данных
@@ -103,30 +109,6 @@ target_IVCurve = None
 
 # название временного файла схемы для запуска PySpice
 circuit_SessionFileName = 'var1.cir'
-
-# строки - шаблон файла схемы PySpice. 
-# Шаблон файла схемы - файл с расширением *.cir_t, аналогичный файлу описания 
-# схемы ngspice *.cir, где вместо конкретного значения емкости или сопротивлния
-# компонента стоит символ замены '{}'
-circuit_TemplateStrings = ('* cir file corresponding to the equivalent circuit.',
-    '* Цепь 1\n',
-    'R1 _net1 Input {}\n',
-    'C1 _net0 _net1 {}\n',
-    'R_C1 _net0 _net1 {}\n',
-    'D1 _net0 0 DMOD_D1 AREA=1.0 Temp=26.85\n',
-    'R_D1 0 _net0 {}\n',
-    '* Цепь 2\n',
-    'R2 _net4 Input {}\n',
-    'C2 0 _net4 {}\n',
-    'R_C2 0 _net4 {}\n',
-    '* Цепь 3\n',
-    'R3 _net3 Input {}\n',
-    'C3 _net2 _net3 {}\n',
-    'R_C3 _net2 _net3 {}\n',
-    'D3 0 _net2 DMOD_D1 AREA=1.0 Temp=26.85\n',
-    'R_D3 0 _net2 {}\n',
-    '.MODEL DMOD_D1 D (Is=2.22e-10 N=1.65 Cj0=4e-12 M=0.333 Vj=0.7 Fc=0.5 Rs=0.0686 Tt=5.76e-09 Ikf=0 Kf=0 Af=1 Bv=75 Ibv=1e-06 Xti=3 Eg=1.11 Tcv=0 Trs=0 Ttt1=0 Ttt2=0 Tm1=0 Tm2=0 Tnom=26.85 )\n',
-    '.END' )
 
 # список значений для файла шаблона схемы. Число элементов - не меньше, чем 
 # знаков {} в файле шаблона схемы
@@ -208,7 +190,16 @@ def init_target_by_circuitFile(fileName = circuit_SessionFileName):
     target_VCurrent = analysis.VCurrent
     target_input_dummy = analysis.input_dummy
     
-    target_IVCurve = analysis_to_IVCurve()
+    iv_curve = libivcmp.IvCurve()
+    for i in range(MAX_NUM_POINTS):
+        iv_curve.voltages[i] = c_double(analysis.input_dummy[i]) # Ток и напряжение были поменяны местами
+        iv_curve.currents[i] = c_double(analysis.VCurrent[i])
+    
+    min_var_c = 0.01 * np.max(iv_curve.currents[:MAX_NUM_POINTS]) # value of noise for current
+    min_var_v = 0.01 * np.max(iv_curve.voltages[:MAX_NUM_POINTS]) # value of noise for voltage
+    libivcmp.SetMinVC(min_var_v, min_var_c) # Правильные значения фильтров для корректной работы
+    
+    target_IVCurve = iv_curve
               
            
 # инициализировать целевую модель данными из csv файла, установить число точек на кривой MAX_NUM_POINTS
@@ -256,72 +247,114 @@ def init_target_from_csvFile(fileName):
 
 def Xi_to_RC(Xi):    
     RC = Xi.copy()
-    RC[1] = R_to_C(Xi[1]) # C1
-    RC[5] = R_to_C(Xi[5]) # C2
-    RC[8] = R_to_C(Xi[8]) # C3
     
+    RC[0] = np.abs(Xi[0])
+    RC[1] = np.abs(R_to_C(Xi[1])) # C1
+    RC[2] = np.abs(Xi[2])
+    RC[3] = np.abs(Xi[3])
+    
+    RC[4] = np.abs(Xi[4])
+    RC[5] = np.abs(R_to_C(Xi[5])) # C2
+    RC[6] = np.abs(Xi[6])
+    
+    RC[7] = np.abs(Xi[7])
+    RC[8] = np.abs(R_to_C(Xi[8])) # C3
+    RC[9] = np.abs(Xi[9])
+    RC[10] = np.abs(Xi[10])   
     return RC
 
-circuit = None
 
 # в наборе строк шаблона схемы сделать замену {} на значения 
 # варьирования Xi_values, сохранить заданным с именем
 def generate_circuitFile_by_values( Xi_values):
-    # if circuit is not None:
-    #     return
+    newF = open(circuit_SessionFileName, 'w')
     
-    fileCircuit = circuit_SessionFileName
-    #print('\ngenerate_circuitFile_by_values()\n'+str(Xi_values)) 
-    newF = open(fileCircuit, 'w')
     rc_values = Xi_to_RC(Xi_values)
-    i = 0
     
-    for tStr in circuit_TemplateStrings:
-        cStr = tStr
-        if tStr.find('{}')>=0:
-            cStr = tStr.format(str(np.abs(rc_values[i]))) # ставим абсолютные значения номиналов
-            i +=1
+    newF.write('* cir file corresponding to the equivalent circuit.\n')
+    # * Цепь 1
+    if rc_values[0]<BIG_R: # цепь R1 присутствует
+        if rc_values[2]>= BIG_R: # C1 присутствует 
+            newF.write('R1 _net1 Input {:e}\n'.format(rc_values[0]))
+            newF.write('C1 _net0 _net1 {:e}\n'.format(rc_values[1]))
+        else: # С1 нет
+            newF.write('R1 _net0 Input {:e}\n'.format(rc_values[0]))
+        
+        if rc_values[3]>= BIG_R: # D1 присутствует
+            newF.write('D1 _net0 0 DMOD_D1 AREA=1.0 Temp=26.85\n')
+        else: # вместо D1 перемычка
+            newF.write('R_D1 0 _net0 {:e}\n'.format(rc_values[3]))
+      
+    # * Цепь 2
+    if rc_values[4]<BIG_R:
+        if rc_values[6]>= BIG_R: # C2 присутствует
+            newF.write('R2 _net4 Input {:e}\n'.format(rc_values[4]))
+            newF.write('C2 0 _net4 {:e}\n'.format(rc_values[5]))
+        else: # вместо С2 перемычка, R2 сразу на землю
+            newF.write('R2 0 Input {:e}\n'.format(rc_values[4]))
+    
+    # * Цепь 3
+    if rc_values[7]<BIG_R:
+        if rc_values[9]>=BIG_R: # C3 присутствует
+            newF.write('R3 _net3 Input {:e}\n'.format(rc_values[7]))
+            newF.write('C3 _net2 _net3 {:e}\n'.format(rc_values[8]))
+        else: # С3 нет
+            newF.write('R3 _net2 Input {:e}\n'.format(rc_values[7]))
             
-        newF.write(cStr)
+        if rc_values[10]>=BIG_R: # D3 присутствует
+            newF.write('D3 0 _net2 DMOD_D1 AREA=1.0 Temp=26.85\n')
+        else: # вместо D3 перемычка
+            newF.write('R_D3 0 _net2 {:e}\n'.format(rc_values[10]))
+     
+    # есть диоды, добавляем модель
+    if (rc_values[10]>=BIG_R)or(rc_values[3]>= BIG_R):    
+        newF.write('.MODEL DMOD_D1 D (Is=2.22e-10 N=1.65 Cj0=4e-12 M=0.333 Vj=0.7 Fc=0.5 Rs=0.0686 Tt=5.76e-09 Ikf=0 Kf=0 Af=1 Bv=75 Ibv=1e-06 Xti=3 Eg=1.11 Tcv=0 Trs=0 Ttt1=0 Ttt2=0 Tm1=0 Tm2=0 Tnom=26.85 )\n')
+    
+    newF.write('.END')     
     newF.close()
 
   
 # промоделировать файл схемы
-def process_circuitFile(csvName='',xi=None):
-    global analysis,circuit
+def process_circuitFile(csvName=''):
+    global analysis
     del(analysis) # необходимо
     
     input_data = spice.Init_Data(INIT_F, INIT_V, INIT_Rcs,INIT_SNR )
     
-    # if circuit is None:
     circuit = spice.LoadFile(circuit_SessionFileName)
     analysis = spice.CreateCVC1(circuit, input_data, MAX_NUM_POINTS, "input", INIT_CYCLE)   
-    # else:
-    #     circuit_SetValues(xi)    
-    #     analysis = spice.CreateCVC1_rcs(circuit, input_data, MAX_NUM_POINTS, "input", INIT_CYCLE)   
     
     if(not csvName==''):
         spice.SaveFile(analysis, csvName)
  
 
-def circuit_SetValues( Xi_values):
-    global circuit
-    rc_values = Xi_to_RC(Xi_values)
+# def create_circuit_by_values( Xi_values):
+#     rc_values = Xi_to_RC(Xi_values)
+#     circuit = Circuit('Test')
+#     #* cir file corresponding to the equivalent circuit.
     
-    circuit.R1.resistance = np.abs(rc_values[0])
-    circuit.C1.capacitance = np.abs(rc_values[1])
-    circuit.R_C1.resistance = np.abs(rc_values[2])
-    circuit.R_D1.resistance = np.abs(rc_values[3])
+#     #* Цепь 1
+#     circuit.R(1,'_net1','Input',rc_values[0]) #'R1 _net1 Input {}\n',
+#     circuit.C(1,'_net0','_net1',rc_values[1]) #'C1 _net0 _net1 {}\n',
+#     circuit.R('_C1','_net0','_net1',rc_values[2]) #'R_C1 _net0 _net1 {}\n',
+#     'D1 _net0 0 DMOD_D1 AREA=1.0 Temp=26.85\n',
+#     circuit.R('_D1',0,'_net0',rc_values[3]) #'R_D1 0 _net0 {}\n',
     
-    circuit.R2.resistance = np.abs(rc_values[4])
-    circuit.C2.capacitance = np.abs(rc_values[5])
-    circuit.R_C2.resistance = np.abs(rc_values[6])
+#     #* Цепь 2
+#     circuit.R(2,'_net4','Input',rc_values[4]) #'R2 _net4 Input {}\n',
+#     circuit.C(2,0,'_net4',rc_values[5]) #C2 0 _net4 {}\n',
+#     circuit.R('_C2',0,'_net4',rc_values[6]) #'R_C2 0 _net4 {}\n',
     
-    circuit.R3.resistance = np.abs(rc_values[7])
-    circuit.C3.capacitance = np.abs(rc_values[8])
-    circuit.R_C3.resistance = np.abs(rc_values[9])
-    circuit.R_D3.resistance = np.abs(rc_values[10])  
-    return 
+#     #* Цепь 3
+#     circuit.R(3,'_net3','Input',rc_values[7]) #'R3 _net3 Input {}\n',
+#     circuit.C(3,'_net2','_net3',rc_values[8]) #'C3 _net2 _net3 {}\n',
+#     circuit.R('_C3','_net2','_net3',rc_values[9]) #'R_C3 _net2 _net3 {}\n',
+#     'D3 0 _net2 DMOD_D1 AREA=1.0 Temp=26.85\n',
+#     circuit.R('_D3',0,'_net2',rc_values[10]) #'R_D3 0 _net2 {}\n',
+#     '.MODEL DMOD_D1 D (Is=2.22e-10 N=1.65 Cj0=4e-12 M=0.333 Vj=0.7 Fc=0.5 Rs=0.0686 Tt=5.76e-09 Ikf=0 Kf=0 Af=1 Bv=75 Ibv=1e-06 Xti=3 Eg=1.11 Tcv=0 Trs=0 Ttt1=0 Ttt2=0 Tm1=0 Tm2=0 Tnom=26.85 )\n',
+#     '.END'
+    
+#     return circuit
 
     
 # последний анализ перевести в форму, пригодную для сравнения в libivcmp
@@ -365,8 +398,7 @@ def analysis_plot(title='',pngName=''):
     elif not target_fileName=='':
        s = target_fileName
      
-    #s = s+', misfit='+str(misfit_result)+', ivcmp='+str(ivcmp_result)
-   
+
     s = s+', misfit='+ format(misfit_result,'0.5E')+', ivcmp='+format(ivcmp_result,'0.5E')
     
     plt.title(s)
@@ -495,7 +527,7 @@ def fitter_subroutine(Xargs):
     #if circuit is None:
     generate_circuitFile_by_values(xi)
     #print(xi)
-    process_circuitFile('',xi)
+    process_circuitFile('')
     
     misfit = analysis_misfit()
       
@@ -535,7 +567,7 @@ def run_fitter(result_cir_file_name='',result_csv_file_name=''):
     for i in range(0,len(Xargs)):
         Xargs[i] = 0.
     
-    resX = spo.minimize(fitter_subroutine,Xargs,method='Powell',callback=fitter_callback,options={'maxfev':MAXFEV,'xtol':VALUES_TOLERANCE})    
+    resX = spo.minimize(fitter_subroutine,Xargs,method='Powell',callback=fitter_callback, options={'maxfev':MAXFEV,'xtol':VALUES_TOLERANCE})    
               
     if(not result_csv_file_name==''):
         spice.SaveFile(analysis, result_csv_file_name)
@@ -791,7 +823,7 @@ def Session_processAll(fileName='result.txt'):
             print('\nswcode = '+str(swcode))
             print('misfit = '+str(best_misfit))
             print(ses['result_sch'])           
-            #analysis_plot()
+            analysis_plot()
             if FITTER_SUCCESS:
                 print(ses['result_sch'])           
                 analysis_plot()
@@ -914,19 +946,19 @@ def test_data(csv_data,fileName='result.txt'):
 def main(): 
     #libivcmp.set_MAX_NUM_POINTS(100)
     #init_target_from_csvFile('пример1.csv')
-    # test1()
-    # test2()
-    # test3()
-    # test4()
-    # test5()
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
     # return 
-    test_data('пример3.csv','пример3.txt')
-    test_data('test_nores.csv')
-    test_data('test_rc.csv')
-    test_data('test_rcd.csv')
-    test_data('test_rcd_no.csv')
-    test_data('test_rcd_rcd.csv')
-    test_data('test_rd_ii_c.csv')
+    # test_data('пример3.csv','пример3.txt')
+    # test_data('test_nores.csv')
+    # test_data('test_rc.csv')
+    # test_data('test_rcd.csv')
+    # test_data('test_rcd_no.csv')
+    # test_data('test_rcd_rcd.csv')
+    # test_data('test_rd_ii_c.csv')
     
     
 if __name__=='__main__':
