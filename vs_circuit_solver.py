@@ -83,7 +83,7 @@ VALUES_TOLERANCE = 1e-2
 
 # число вычислений функции в процессе оптимизации. При малых значениях-
 # минимально возможное число
-MAXFEV = 10
+MAXFEV = 1000
 
 # число точек в массивах тока и напряжения, может измениться при загрузке 
 # внешнего файла данных
@@ -93,7 +93,7 @@ MAX_NUM_POINTS = 100
 min_ivc = 1 
 #############################################################################
 
-# результат последненго моделирования в PySpice
+# результат последнего моделирования в PySpice
 analysis = None
 
 # целевая кривая с током. Та, которую мы подбираем.
@@ -266,7 +266,6 @@ def Xi_to_RC(Xi):
 # в наборе строк шаблона схемы сделать замену {} на значения 
 # варьирования Xi_values, сохранить заданным с именем
 def generate_circuitFile_by_values( Xi_values):
-
     newF = open(circuit_SessionFileName, 'w')
     rc_values = Xi_to_RC(Xi_values)
     
@@ -329,6 +328,7 @@ def process_circuitFile():
 iv_curve = None
 def analysis_to_IVCurve():
     global iv_curve
+    
     if iv_curve is None:    
         iv_curve = libivcmp.IvCurve()
         
@@ -533,6 +533,7 @@ def run_fitter(result_cir_file_name='',result_csv_file_name=''):
         Xargs[i] = 0.
     
     resX = spo.minimize(fitter_subroutine,Xargs,method='Powell',callback=fitter_callback, options={'maxfev':MAXFEV,'xtol':VALUES_TOLERANCE})    
+    #resX = spo.minimize(fitter_subroutine,Xargs,method='TNC',callback=fitter_callback, options={'maxfev':MAXFEV,'xtol':VALUES_TOLERANCE})    
               
     if(not result_csv_file_name==''):
         spice.SaveFile(analysis, result_csv_file_name)
@@ -544,18 +545,20 @@ def run_fitter(result_cir_file_name='',result_csv_file_name=''):
 ### элементарная схема ###
 ##############################################################################
 def Sch_init():
+    R = 100.
+    C = 1e-6
     sch = {}
-    sch['R1'] = HUGE_R
-    sch['C1'] = NONE_C # [1]
+    sch['R1'] = R
+    sch['C1'] = C # [1]
     sch['_R_C1'] = NULL_R 
     sch['_R_D1'] = HUGE_R
     
-    sch['R2'] = HUGE_R 
-    sch['C2'] = NONE_C # [5]
+    sch['R2'] = R 
+    sch['C2'] = C # [5]
     sch['_R_C2'] = NULL_R
     
-    sch['R3'] = HUGE_R 
-    sch['C3'] = NONE_C #[8]
+    sch['R3'] = R 
+    sch['C3'] = C #[8]
     sch['_R_C3'] = NULL_R 
     sch['_R_D3'] = HUGE_R         
     return sch
@@ -594,6 +597,165 @@ def Sch_load_from_Xi(sch,Xi):
             sch[k] = Xi[j]
         j += 1
 
+    
+def get_Z1phase_approximation():
+    # R1,C1 по максимуму тока и напряжения
+    I_max = np.amax(target_VCurrent)
+    max_cur_ind = np.argmax(target_VCurrent)
+    max_volt_ind = np.argmax(target_input_dummy)
+    
+    phase_1 = 2.*np.pi*(max_cur_ind-max_volt_ind)/(MAX_NUM_POINTS)
+    
+    V_max = target_input_dummy[max_cur_ind]
+    Z1 = V_div_I(V_max,I_max)
+    return (Z1,phase_1)
+
+
+def get_Z3phase_approximation():
+    I_min = np.amin(target_VCurrent)
+    
+    # R3,C3 по минимуму тока и напряжения
+    min_cur_ind = np.argmin(target_VCurrent)
+    min_volt_ind = np.argmin(target_input_dummy)
+    
+    V_min = target_input_dummy[min_cur_ind]
+    Z3 = V_div_I(V_min,I_min)
+    
+    phase_3 = 2.*np.pi*(min_cur_ind-min_volt_ind)/(MAX_NUM_POINTS)
+    
+    # R3 = Z3*np.cos(phase_3)
+    # C3 = R_to_C(Z3*np.sin(phase_3))     
+    return (Z3,phase_3)
+    
+    
+def get_Z1phase_diode_approximation():
+    # R1,C1 по максимуму тока и напряжения
+    I_max = np.amax(target_VCurrent)
+    max_cur_ind = np.argmax(target_VCurrent)
+    max_volt_ind = np.argmax(target_input_dummy)
+    
+    phase_1 = 2.*np.pi*(max_cur_ind-max_volt_ind)/(MAX_NUM_POINTS)
+    
+    V_max = target_input_dummy[max_cur_ind]-DIODE_VOLTAGE
+    Z1 = V_div_I(V_max,I_max)
+    return (Z1,phase_1)
+
+
+def get_Z3phase_diode_approximation():
+    I_min = np.amin(target_VCurrent)
+    
+    # R3,C3 по минимуму тока и напряжения
+    min_cur_ind = np.argmin(target_VCurrent)
+    min_volt_ind = np.argmin(target_input_dummy)
+    
+    V_min = target_input_dummy[min_cur_ind]+DIODE_VOLTAGE
+    Z3 = V_div_I(V_min,I_min)
+    
+    phase_3 = 2.*np.pi*(min_cur_ind-min_volt_ind)/(MAX_NUM_POINTS)
+    
+    # R3 = Z3*np.cos(phase_3)
+    # C3 = R_to_C(Z3*np.sin(phase_3))     
+    return (Z3,phase_3)
+
+
+CODE2_COUNT = 4
+# ses - сессия варьирования, которую необходимо проинициализировать
+# swcode - числовой код,от 0 до 255 включительно, задает положения переключателей
+# code2 - дополнительный код, для каждого варианта swcode передавать code2=0,1,2, ...
+# до тех пор, пока функция не вернет False
+def Session_init_by_approximation(ses,swcode,code2):    
+    R1=False if(swcode & 1) else True    
+    R2=False if(swcode & 2) else True
+    R3=False if(swcode & 4) else True    
+    # C1=False if(swcode & 8) else True         
+    # D1=False if(swcode & 16) else True     
+    # C3=False if(swcode & 32) else True   
+    # D3=False if(swcode & 64) else True             
+    # C2=False if(swcode & 128) else True   
+    
+    sch = ses['start_sch']           
+    Sch_init_by_approximation(sch)
+    Session_set_switchers(ses,swcode)
+    Session_run1(ses)
+    return False
+
+    if code2==0:
+        Session_run1(ses)
+        return True # вызвать снова
+
+    if R2 and (not R1)and(not R3):
+        (r2,phase2) = get_Z1phase_approximation()
+        sch['R2']=r2*np.cos(np.pi*code2/CODE2_COUNT)
+        #sch['C2']=R_to_C(r2*np.sin(np.pi*code2/CODE2_COUNT))
+        ses['start_sch'] = sch     
+        Session_run1(ses)
+        #if code2>=CODE2_COUNT: return False
+        return False
+    
+    if R2 and R1 and (not R3):
+        (r2,phase2) = get_Z3phase_approximation()
+        sch['R2']=r2*np.cos(phase2)
+        #sch['C2']=R_to_C(r2*np.sin(phase2))
+        
+        (r1,phase1) = get_Z1phase_diode_approximation()
+        sch['R1']=r1*np.cos(phase1)
+        #sch['C1']=R_to_C(r1*np.sin(phase1))
+        ses['start_sch'] = sch
+        Session_run1(ses)
+        return False
+    
+    if R2 and R3 and (not R1):
+        (r2,phase2) = get_Z1phase_approximation()
+        sch['R2']=r2*np.cos(phase2)
+        #sch['C2']=R_to_C(r2*np.sin(phase2))
+        
+        (r3,phase3) = get_Z3phase_diode_approximation()
+        sch['R3']=r3*np.cos(phase3)
+        #sch['C3']=R_to_C(r3*np.sin(phase3))
+        ses['start_sch'] = sch
+        Session_run1(ses)
+        return False
+    
+    if R1 and R3 and (not R2):
+        (r1,phase1) = get_Z1phase_diode_approximation()
+        sch['R1']=r1*np.cos(phase1)
+        #sch['C1']=R_to_C(r1*np.sin(phase1))
+        
+        (r3,phase3) = get_Z3phase_diode_approximation()
+        sch['R3']=r3*np.cos(phase3)
+        #sch['C3']=R_to_C(r3*np.sin(phase3))
+        ses['start_sch'] = sch
+        Session_run1(ses)
+        return False
+    
+    if R1 and (not R2)and(not R3):
+        (r1,phase1) = get_Z1phase_diode_approximation()
+        sch['R1']=r1*np.cos(phase1)
+        #sch['C1']=R_to_C(r1*np.sin(phase1))
+        ses['start_sch'] = sch
+        Session_run1(ses)
+        return False
+    
+    if R3 and (not R1)and(not R2):
+        (r3,phase3) = get_Z3phase_diode_approximation()
+        sch['R3']=r3*np.cos(phase3)
+        #sch['C3']=R_to_C(r3*np.sin(phase3))
+        ses['start_sch'] = sch
+        Session_run1(ses)
+        return False
+    
+    Session_run1(ses)
+    return False
+
+
+def Session_init_by_approximation_old(ses,swcode,code2):    
+    sch = ses['start_sch']           
+    Sch_init_by_approximation(sch)
+    Session_set_switchers(ses,swcode)
+    Session_run1(ses)
+    
+    return False
+        
 
 def Sch_init_by_approximation(sch):
     # R1,C1 по максимуму тока и напряжения
@@ -645,6 +807,7 @@ def Sch_init_by_approximation(sch):
         sch['_R_C3'] = HUGE_R
         sch['C2'] = C2
         
+        
 def Sch_saveToFile(sch,fileName):
     try:
         newF = open(fileName, 'w')
@@ -676,10 +839,13 @@ def Session_run1(session):
     except KeyError:
         sch = session['start_sch']
     
+    #print('\nSession_run1: sch='+str(sch))
     xi = Sch_get_Xi(sch)
     set_circuit_nominals(xi)
-    calculate_misfit(xi)
+    session['misfit'] = calculate_misfit(xi)
+    #print('Session_run1: misfit='+str(session['misfit']))
         
+    
 # запустить подбор для сессии
 def Session_run_fitter(session):
     global FitterCount
@@ -787,6 +953,8 @@ def Session_set_switchers(session, swcode):
 def set_fitter_profile(p):
     global VALUES_TOLERANCE,MAXFEV
     if p==1:
+        VALUES_TOLERANCE = 1e-3
+        MAXFEV = 100
         return 
     if p==2:
         return 
@@ -800,27 +968,37 @@ def set_fitter_profile(p):
 def Session_processAll(fileName='result.txt'):
     global FITTER_SUCCESS
     FITTER_SUCCESS = False
-    best_ses = None
-    best_misfit = 1e9
+    ses_list = []
     
+    ## создаем список сессий для старта
     for swcode in range(255):
-        if not is_valid_switchers(swcode):
-            continue
+        if not is_valid_switchers(swcode): continue
         
-        sch0 = Sch_init()
-        Sch_init_by_approximation(sch0)
-        ses = Session_create(sch0)
-        Session_set_switchers(ses,swcode)
+        code2 = 0    
+        next_code2 = True
+        
+        while next_code2:
+            sch0 = Sch_init()
+            ses = Session_create(sch0)
+            next_code2 = Session_init_by_approximation(ses,swcode,code2)
+            code2 += 1
+            ses_list += [ses]
+    ## end_for
+                      
+    ## сортируем сессии, чтобы начать подбор с наиболее подходящих
+    ses_list = sorted(ses_list,key=lambda s:s['misfit'])  
+    
+    best_ses = ses_list[0]
+    best_misfit = best_ses['misfit']
+         
+    ## запускаем автоподбор, пока не будут удовлетворены условия останова
+    for ses in ses_list:
         Session_run_fitter(ses)
-        
         if(ses['misfit']<best_misfit):
             best_misfit = ses['misfit']
             best_ses = ses
-            #sch_result = Session_create(ses['result_sch'])
-            #Session_set_switchers(sch_result,swcode)
-            print('\nswcode = '+str(swcode))
             print('misfit = '+str(best_misfit))
-            print(ses['result_sch'])           
+            #print(ses['result_sch'])           
             #analysis_plot()
             if FITTER_SUCCESS:
                 print(ses['result_sch'])           
@@ -828,12 +1006,15 @@ def Session_processAll(fileName='result.txt'):
                 print('FITTER_SUCCESS!!\nmisfit = '+str(best_misfit))
                 Sch_saveToFile(ses['result_sch'], fileName)
                 return
-
+    ## end_for
+    
+    # подбор завершился неудачно, выводим что есть
     print('FITTER routine unsuccessfull\nmisfit = '+str(best_misfit))   
     Sch_saveToFile(best_ses['result_sch'], fileName)
     Session_run1(best_ses)
     analysis_plot('FITTER routine unsuccessfull')
-    
+
+
 #############################################################################
         
 def test1():
@@ -930,17 +1111,17 @@ def test_data(csv_data,fileName='result.txt'):
 def main(): 
     #libivcmp.set_MAX_NUM_POINTS(100)
     #init_target_from_csvFile('пример1.csv')
-    # test1()
-    # test2()
-    # test3()
-    # test4()
-    # test5()
-    # return 
+    test1()
+    test2()
+    test3()
+    test4()
+    test5()
+    # # return 
     # test_data('пример3.csv','пример3.txt')
     # test_data('test_nores.csv')
     # test_data('test_rc.csv')
-    test_data('test_rcd.csv')
-    test_data('test_rcd_no.csv')
+    # test_data('test_rcd.csv')
+    # test_data('test_rcd_no.csv')
     # test_data('test_rcd_rcd.csv')
     # test_data('test_rd_ii_c.csv')
     
