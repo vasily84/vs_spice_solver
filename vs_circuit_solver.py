@@ -56,7 +56,7 @@ INIT_CYCLE = 3
 DIODE_VOLTAGE = 0.6
 
 # напряжение, при котором диоды считаем закрытыми
-SMALL_VOLTAGE = 0.1
+SMALL_VOLTAGE = 0.01
 
 # "огромное сопротивление".
 HUGE_R = 1e10 # 10 ГОм
@@ -83,7 +83,7 @@ VALUES_TOLERANCE = 1e-2
 
 # число вычислений функции в процессе оптимизации. При малых значениях-
 # минимально возможное число
-MAXFEV = 1000
+MAXFEV = 100
 
 # число точек в массивах тока и напряжения, может измениться при загрузке 
 # внешнего файла данных
@@ -185,7 +185,13 @@ def set_circuit_template(fileName):
 # инициализировать целевую модель, промоделировав файл схемы
 def init_target_by_circuitFile(fileName = circuit_SessionFileName):
     global target_VCurrent, target_input_dummy, target_IVCurve
+    global circuit_SessionFileName
+    
+    var1 = circuit_SessionFileName
+    circuit_SessionFileName = fileName
     process_circuitFile()
+    circuit_SessionFileName = var1
+    
     target_VCurrent = analysis.VCurrent
     target_input_dummy = analysis.input_dummy
     
@@ -465,7 +471,6 @@ def analysis_misfit_core():
     
     s = "unknown MISFIT_METHOD = '"+str(MISFIT_METHOD)+"'"
     raise RuntimeError(s)
-
     
     
        
@@ -491,7 +496,7 @@ def calculate_misfit(Xi):
 
 # функция вызывается оптимизатором
 def fitter_subroutine(Xargs):
-    global Xi_result,misfit_result,FitterCount,BestMisfitCount,ivcmp_result
+    global Xi_result,misfit_result,FitterCount,BestMisfitCount,ivcmp_result,FITTER_SUCCESS
     FitterCount += 1
     xi = Xi_unroll(Xargs)
     misfit = calculate_misfit(xi)
@@ -512,6 +517,10 @@ def fitter_subroutine(Xargs):
         ivcmp_result = analysis_misfit_ivcmp()
         BestMisfitCount += 1
         #print("fCount="+str(FitterCount)+', mCount='+str(BestMisfitCount)+', misfit='+str(Mscalar)+', Xargs='+str(Xargs))
+    
+    # дополнительная проверка
+    if ivcmp_result<=IVCMP_TOLERANCE: # достигли необходимой точности       
+        FITTER_SUCCESS = True
         
     return misfit 
 
@@ -563,19 +572,6 @@ def Sch_init():
     sch['_R_D3'] = HUGE_R         
     return sch
 
-
-def Sch_set_switch(sch,key,using_sw):
-    if using_sw:
-        r_sw = HUGE_R
-    else:
-        r_sw = NULL_R
-        
-    if key=='C1': sch['_R_C1']= r_sw
-    if key=='C2': sch['_R_C2']= r_sw
-    if key=='C3': sch['_R_C3']= r_sw
-    if key=='D1': sch['_R_D1']= r_sw
-    if key=='D3': sch['_R_D3']= r_sw
-    
 
 def Sch_get_Xi(sch):
     xi = []
@@ -748,15 +744,6 @@ def Session_init_by_approximation(ses,swcode,code2):
     return False
 
 
-def Session_init_by_approximation_old(ses,swcode,code2):    
-    sch = ses['start_sch']           
-    Sch_init_by_approximation(sch)
-    Session_set_switchers(ses,swcode)
-    Session_run1(ses)
-    
-    return False
-        
-
 def Sch_init_by_approximation(sch):
     # R1,C1 по максимуму тока и напряжения
     I_max = np.amax(target_VCurrent)
@@ -802,11 +789,63 @@ def Sch_init_by_approximation(sch):
         
     R2 = R1+R3  # переделать на окрестности малого сигнала
     C2 = C1+C3  # переделать на сдвиг фаз в окрестности ноля
+    
     sch['R2'] = R2
     if C_to_R(C2)>0.01*R2:
         sch['_R_C3'] = HUGE_R
         sch['C2'] = C2
         
+        
+def Sch_init_by_approximation_old(sch):
+    # R1,C1 по максимуму тока и напряжения
+    I_max = np.amax(target_VCurrent)
+    max_cur_ind = np.argmax(target_VCurrent)
+    max_volt_ind = np.argmax(target_input_dummy)
+    
+    phase_1 = 2.*np.pi*(max_cur_ind-max_volt_ind)/(MAX_NUM_POINTS)
+    
+    V_max = target_input_dummy[max_cur_ind]-DIODE_VOLTAGE
+    Z1 = V_div_I(V_max,I_max)
+    #Z1_ = V_div_I(V_max+DIODE_VOLTAGE,I_max)
+    R1 = Z1*np.cos(phase_1)
+    C1 = R_to_C(Z1*np.sin(phase_1))
+    
+    sch['R1'] = np.abs(R1)
+    if np.abs(phase_1*180./np.pi)>1.:
+        sch['_R_C1'] = HUGE_R
+        sch['C1'] = C1
+    
+    # print('R1='+str(R1)+', C1='+str(C1)+' Z1='+str(Z1)+' ,Z1_='+str(Z1_))  
+    # print('phase_1='+str(phase_1*180./np.pi))
+    I_min = np.amin(target_VCurrent)
+    
+    # R3,C3 по минимуму тока и напряжения
+    min_cur_ind = np.argmin(target_VCurrent)
+    min_volt_ind = np.argmin(target_input_dummy)
+    
+    V_min = target_input_dummy[min_cur_ind]+DIODE_VOLTAGE
+    Z3 = V_div_I(V_min,I_min)
+    #Z3_ = V_div_I(V_min-DIODE_VOLTAGE,I_min)
+    
+    phase_3 = 2.*np.pi*(min_cur_ind-min_volt_ind)/(MAX_NUM_POINTS)
+    
+    R3 = Z3*np.cos(phase_3)
+    C3 = R_to_C(Z3*np.sin(phase_3))
+    # print('R3='+str(R3)+', C3='+str(C3)+', Z3='+str(Z3)+', Z3_='+str(Z3_))
+    # print('phase_3='+str(phase_3*180./np.pi))
+    
+    sch['R3'] = np.abs(R3)
+    if np.abs(phase_3*180./np.pi)>1.:
+        sch['_R_C3'] = HUGE_R
+        sch['C3'] = C3
+        
+    R2 = R1+R3  # переделать на окрестности малого сигнала
+    C2 = C1+C3  # переделать на сдвиг фаз в окрестности ноля
+    
+    sch['R2'] = R2
+    if C_to_R(C2)>0.01*R2:
+        sch['_R_C3'] = HUGE_R
+        sch['C2'] = C2
         
 def Sch_saveToFile(sch,fileName):
     try:
@@ -826,6 +865,93 @@ def init_target_by_Sch(sch):
         NORMA_misfit=1.
             
         
+############################################################################
+## площадь кривой X(i),Y(i), в пределах индексов
+def curve_SquareXY(X,Y,index_from,index_to):
+    S = 0.
+    for i in range(index_from,index_to):
+        dx = X[i+1]-X[i]
+        y = (Y[i+1]+Y[i])/2.
+        S += dx*y
+    
+    return S
+        
+
+def curve_INDEX(voltage,current):
+    fsm_region = 0
+    i0=0;i1=0;i2=0;i3=0;i4=0;i5=0;i6=0; i7 = len(voltage)-1
+    
+    L2 = voltage**2+current**2 # квадрат длины
+    max_L2 = 0
+    
+    for i in range(0,len(voltage)):
+        if fsm_region==0:
+            if voltage[i]<(-DIODE_VOLTAGE-SMALL_VOLTAGE):
+                i1 = i
+                i2 = i
+                max_L2 = L2[i]
+                fsm_region = 1
+                continue
+            
+        if fsm_region==1:
+            if L2[i]>max_L2:
+                max_L2 = L2[i]
+                i2 = i
+                
+            if voltage[i]>(-DIODE_VOLTAGE+SMALL_VOLTAGE):
+                i3 = i
+                fsm_region = 2
+                continue
+            
+        if fsm_region==2:
+            if voltage[i]>(DIODE_VOLTAGE+SMALL_VOLTAGE):
+                i4 = i
+                i5 = i
+                max_L2 = L2[i]
+                fsm_region = 3
+                continue
+            
+        if fsm_region==3:
+            if L2[i]>max_L2:
+                max_L2 = L2[i]
+                i5 = i
+                
+            if voltage[i]<(DIODE_VOLTAGE-SMALL_VOLTAGE):
+                i6 = i
+                fsm_region = 7
+                continue
+    ## end_for
+    
+    S1 = curve_SquareXY(voltage,current,i0,i1)
+    
+    S2 = curve_SquareXY(voltage,current,i1,i2)
+    S3 = curve_SquareXY(voltage,current,i2,i3)
+    
+    S4 = curve_SquareXY(voltage,current,i3,i4)
+    
+    S5 = curve_SquareXY(voltage,current,i4,i5)
+    S6 = curve_SquareXY(voltage,current,i5,i6)
+    
+    S7 = curve_SquareXY(voltage,current,i6,i7)
+    
+    
+    print('i0='+str(i0)+', i1='+str(i1)+', i2='+str(i2)+', i3='+str(i3)+', i4='+str(i4)+', i5='+str(i5)+' ,i6='+str(i6)+', i7='+str(i7))
+    print('S1='+str(S1)+', S2='+str(S2)+', S3='+str(S3)+', S4='+str(S4)+', S5='+str(S5)+', S6='+str(S6)+' ,S7='+str(S7))
+    
+    return (i0,i1,i2,i3,i4,i5,i6,i7)      
+
+# вычислить фазовый сдвиг для уровней сигнала меньше напряжения диода на 
+# отрицательной полуволне
+def calc_phase_shift1():
+    pass
+
+def calc_phase_shift2():
+    pass
+
+def calc_phase_shift3():
+    pass
+                
+    
 ############################################################################# 
 def Session_create(start_sch):
     s = {}
@@ -948,28 +1074,16 @@ def Session_set_switchers(session, swcode):
         var_list += ['C2']
     
     session['Xi_variable'] = var_list  
-    
-    
-def set_fitter_profile(p):
-    global VALUES_TOLERANCE,MAXFEV
-    if p==1:
-        VALUES_TOLERANCE = 1e-3
-        MAXFEV = 100
-        return 
-    if p==2:
-        return 
-    #умолчания
-    VALUES_TOLERANCE = 1e-2
-    MAXFEV = 10
-    return
-    
-    
+      
     
 def Session_processAll(fileName='result.txt'):
-    global FITTER_SUCCESS
+    global FITTER_SUCCESS,VALUES_TOLERANCE,MAXFEV
     FITTER_SUCCESS = False
     ses_list = []
+    best_ses = None
+    best_misfit = 2 # заведомо большое число
     
+    ses_count = 0
     ## создаем список сессий для старта
     for swcode in range(255):
         if not is_valid_switchers(swcode): continue
@@ -983,14 +1097,26 @@ def Session_processAll(fileName='result.txt'):
             next_code2 = Session_init_by_approximation(ses,swcode,code2)
             code2 += 1
             ses_list += [ses]
-    ## end_for
-                      
+            ses_count += 1
+            
+            if ses['misfit']<IVCMP_TOLERANCE: # условие останова удовлетворено
+                best_ses = ses
+                best_misfit = best_ses['misfit']
+                print(ses['start_sch'])           
+                analysis_plot('FITTER SUCCESS')
+                print('FITTER_SUCCESS!!\nmisfit = '+str(best_misfit))
+                Sch_saveToFile(ses['start_sch'], fileName)
+                print('good case!!')
+                return
+            
+    ## end_for   
+    #print('ses_count = '+str(ses_count))
+
     ## сортируем сессии, чтобы начать подбор с наиболее подходящих
     ses_list = sorted(ses_list,key=lambda s:s['misfit'])  
-    
     best_ses = ses_list[0]
     best_misfit = best_ses['misfit']
-         
+        
     ## запускаем автоподбор, пока не будут удовлетворены условия останова
     for ses in ses_list:
         Session_run_fitter(ses)
@@ -1020,14 +1146,7 @@ def Session_processAll(fileName='result.txt'):
 def test1():
     sch = Sch_init()
     sch['R1'] = 1e3
-    # sch['C1'] = 1e-5
-    # sch['_R_C1'] = HUGE_R
     sch['R2'] = 1e2
-    # sch['_R_C2'] = HUGE_R
-    # sch['C2'] = 1e-7
-    # sch['C3'] = 1.3e-6
-    # sch['_R_C3'] = HUGE_R
-    # sch['R3'] = 2e3
     init_target_by_Sch(sch)
     print('test1()')
     Session_processAll('test1.txt')
@@ -1038,11 +1157,6 @@ def test2():
     sch['R1'] = 1e2
     sch['C1'] = 1e-5
     sch['_R_C1'] = HUGE_R
-    # sch['R2'] = 1e2
-    # sch['_R_C2'] = HUGE_R
-    # sch['C2'] = 1e-5
-    # sch['C3'] = 1.3e-6
-    # sch['_R_C3'] = HUGE_R
     sch['R3'] = 1e3
     init_target_by_Sch(sch)
     print('test2()')
@@ -1050,15 +1164,9 @@ def test2():
 
 def test3():
     sch = Sch_init()
-    # sch['R1'] = 1e-1
-    # sch['C1'] = 1e-5
-    # sch['_R_C1'] = HUGE_R
     sch['R2'] = 1e2
     sch['_R_C2'] = HUGE_R
     sch['C2'] = 1e-7
-    # sch['C3'] = 1.3e-6
-    # sch['_R_C3'] = HUGE_R
-    # sch['R3'] = 1e-3   
     init_target_by_Sch(sch) 
     print('test3()')
     Session_processAll('test3.txt')
@@ -1066,14 +1174,9 @@ def test3():
 
 def test4(): 
     sch = Sch_init()
-    # sch['R1'] = 1e2
-    # sch['C1'] = 1e-5
-    # sch['_R_C1'] = HUGE_R
     sch['R2'] = 1e2
     sch['_R_C2'] = HUGE_R
     sch['C2'] = 1e-7
-    # sch['C3'] = 1.3e-6
-    # sch['_R_C3'] = HUGE_R
     sch['R3'] = 1e3
     init_target_by_Sch(sch) 
     print('test4()')
@@ -1089,9 +1192,6 @@ def test5():
     sch['R2'] = NULL_R
     sch['_R_C2'] = HUGE_R
     sch['C2'] = 1e-7
-    # sch['C3'] = 1.3e-6
-    # sch['_R_C3'] = HUGE_R
-    # sch['R3'] = 1e3
     init_target_by_Sch(sch) 
     print('test5()')
     Session_processAll('test5.txt')
@@ -1100,30 +1200,52 @@ def test_data(csv_data,fileName='result.txt'):
     print('\n')
     print(csv_data)
     init_target_from_csvFile(csv_data)
-    # plt.plot(target_VCurrent)
-    # plt.show()
-    # plt.plot(target_input_dummy)
-    # plt.show()
+    plt.plot(target_VCurrent)
+    plt.show()
+    plt.plot(target_input_dummy)
+    plt.show()
     Session_processAll(fileName)
 
+
+def test_circuit(circuitFile,resultFile = 'result.txt'):
+    print('\n')
+    print(circuitFile)
+    init_target_by_circuitFile(circuitFile)
+    #
+    # plt.plot(target_input_dummy)
+    # plt.title('voltage')
+    # plt.show()
+    # plt.plot(target_VCurrent)
+    # plt.title('current')
+    # plt.show()
+    # plt.plot(target_VCurrent*target_input_dummy)
+    # plt.title('power')
+    # plt.show()
+    #curve_INDEX(target_input_dummy,target_VCurrent)
+    Session_processAll(resultFile)
  
-    
 def main(): 
     #libivcmp.set_MAX_NUM_POINTS(100)
     #init_target_from_csvFile('пример1.csv')
-    test1()
-    test2()
-    test3()
-    test4()
-    test5()
-    # # return 
-    # test_data('пример3.csv','пример3.txt')
+    # test1()
+    # test2()
+    # test3()
+    # test4()
+    # test5()
+    # return
     # test_data('test_nores.csv')
     # test_data('test_rc.csv')
     # test_data('test_rcd.csv')
     # test_data('test_rcd_no.csv')
     # test_data('test_rcd_rcd.csv')
     # test_data('test_rd_ii_c.csv')
+    # return 
+    test_circuit('NoRes.cir')
+    test_circuit('R-C.cir')
+    test_circuit('R-C-D.cir')
+    test_circuit('R-C-D_No.cir')
+    test_circuit('R-D_ii_C.cir')
+    test_circuit('R1C1D1_ii_R2C2D2.cir')
     
     
 if __name__=='__main__':
