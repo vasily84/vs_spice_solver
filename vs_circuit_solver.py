@@ -21,32 +21,32 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from ctypes import c_double
-import csv
 import json
 # внешние модули
 import MySpice as spice
 import libivcmp
+import gc
 
 
 ### SETTINGS ################################################################
 
 # метод сравнения кривых тока и напряжения
-# может быть : 'libivcmp','sko','sko_fft','power','power_fft'
-#MISFIT_METHOD = 'sko'
+# может быть : 'libivcmp','type_ps'
 MISFIT_METHOD = 'libivcmp'
-#MISFIT_METHOD = 'sko_Z2'
+#MISFIT_METHOD = 'type_ps'
+
 
 # частота, Гц
-INIT_F = 1e3
+INIT_F = 1e4
 # амплитудное напряжение, Вольт, может изменится при загрузке внешнего файла данных
-INIT_V = 2.5
+INIT_V = 5
 
 # токоограничивающий резистор, Ом
-INIT_Rcs = 4.7e-5
+INIT_Rcs = 1e2
 
 # SIGNAL/NOISE ratio
-INIT_SNR = 135.0
-#INIT_SNR = 20.0
+INIT_SNR = 120.0
+#INIT_SNR = 35.0
 
 # число циклов колебаний напряжения в записи
 INIT_CYCLE = 2
@@ -68,16 +68,13 @@ BIG_R = 1e8 # 100 МОм
 # "мизерное сопротивление"
 NULL_R = 1e-6 # 1 мкОм
 
-# "малое сопротивление"
-SMALL_R = 1e-4 # 100 мкОм
-
-# "мизерная емкость"
+# "мизерная емкость","огромная емкость"
 NONE_C = 1e-15 # 0.001 пФ
- 
+HUGE_C = 1e-3 # 1000 мкФ
 # погрешность подбора кривых- критерий остановки. Подбор длится до тех пор, 
 # пока функция сравнения не вернет значение CompareIvc()<=IVCMP_TOLERANCE     
-IVCMP_TOLERANCE = 2e-2
-#IVCMP_TOLERANCE = 0.
+#IVCMP_TOLERANCE = 5e-3
+IVCMP_TOLERANCE = 0.
 
 
 # погрешность подбора номиналов в процентах. Номиналы емкостей считаются по 
@@ -90,7 +87,7 @@ MAXFEV = 100
 
 # число точек в массивах тока и напряжения, может измениться при загрузке 
 # внешнего файла данных
-MAX_NUM_POINTS = 50
+MAX_NUM_POINTS = 100
 
 
 min_ivc = 1 
@@ -99,8 +96,9 @@ min_ivc = 1
 # результат последнего моделирования в PySpice
 analysis = None
 
-# целевая кривая с током. Та, которую мы подбираем.
+# целевая кривая с током. Та, которую мы подбираем
 target_VCurrent = None
+# измеренное прибором напряжение в точке после резистора Rcs
 target_input_dummy = None
 
 target_fileName = ''
@@ -201,29 +199,63 @@ def init_target_by_circuitFile(fileName = circuit_SessionFileName):
     target_IVCurve = iv_curve
               
            
-# инициализировать целевую модель данными из csv файла, установить число точек на кривой MAX_NUM_POINTS
+
+
+# инициализировать целевую модель данными из json файла, установить число точек на кривой MAX_NUM_POINTS
 # определенными из файла 
-def init_target_from_csvFile(fileName):
-    global MAX_NUM_POINTS,INIT_V,NORMA_misfit
+def init_target_from_jsnFile(fileName, N):
+    global MAX_NUM_POINTS,INIT_V,INIT_F,INIT_Rcs
     global target_fileName
     global target_VCurrent,target_input_dummy,target_IVCurve
+    global Z123_sch
     #
+    Z123_sch = None
     target_fileName = fileName
     
-    with open(fileName,newline='') as csv_file:
-        csv_reader = csv.reader(csv_file, delimiter=';')
-        i = 0
-        for row in csv_reader:
-            # todo непонятно, почему читает пустые нечетные строки, выяснить
-            if i==0:
-                target_input_dummy = np.array(row,dtype=float)
-            if i==2:
-                target_VCurrent = np.array(row,dtype=float) 
-            i += 1         
+    ivc_real = open_board(fileName)
+    if ivc_real == None:
+        print('open_board() failed')
+        return
     
-    MAX_NUM_POINTS = len(target_input_dummy)
-    INIT_V = np.amax(target_input_dummy)
+    print('record number = '+str(N))
+    target_input_dummy = ivc_real["elements"][0]["pins"][N]["iv_curves"][0]["voltages"]# np.array(row,dtype=float)
+    target_VCurrent = ivc_real["elements"][0]["pins"][N]["iv_curves"][0]["currents"]# np.array(row,dtype=float)        
 
+    # plt.plot(target_input_dummy)
+    # plt.title("input_dummy")
+    # plt.show()
+    # plt.plot(target_VCurrent)
+    # plt.title("VCurrent")
+    # plt.show()
+    
+    
+    # частота, Гц
+    INIT_F = ivc_real["elements"][0]["pins"][N]["iv_curves"][0]["measurement_settings"]["probe_signal_frequency"]
+    print('INIT_F = '+str(INIT_F))
+    # амплитудное напряжение, Вольт, может изменится при загрузке внешнего файла данных
+    INIT_V = ivc_real["elements"][0]["pins"][N]["iv_curves"][0]["measurement_settings"]["max_voltage"]
+    print('INIT_V = '+str(INIT_V))
+    # токоограничивающий резистор, Ом
+    INIT_Rcs = ivc_real["elements"][0]["pins"][N]["iv_curves"][0]["measurement_settings"]["internal_resistance"]
+    print('INIT_Rcs = '+str(INIT_Rcs))
+
+    MAX_NUM_POINTS = len(target_input_dummy)
+    print('MAX_NUM_POINTS = '+str(MAX_NUM_POINTS))
+    
+
+    # vmain = np.copy(target_input_dummy)
+    # vmain2 = np.copy(target_VCurrent)
+    
+    # for i in range(len(vmain)):
+    #     vmain[i] = target_input_dummy[i]+target_VCurrent[i]*INIT_Rcs 
+    #     vmain2[i] = target_VCurrent[i]*INIT_Rcs
+    # plt.plot(target_input_dummy)
+    # plt.plot(vmain2)
+    # plt.plot(vmain)
+    # plt.legend(['input_dummy','VCurrent*Rcs','fullVoltage'])
+    # plt.title("Voltages")
+    # plt.show()
+    
     iv_curve = libivcmp.IvCurve()
     for i in range(MAX_NUM_POINTS):
         iv_curve.voltages[i] = c_double(target_input_dummy[i]) # Ток и напряжение были поменяны местами
@@ -235,12 +267,6 @@ def init_target_from_csvFile(fileName):
     
     # libivcmp.set_MAX_NUM_POINTS(MAX_NUM_POINTS) # В некоторых случаях искажает работу модуля
     target_IVCurve = iv_curve
-    
-    try:
-        NORMA_misfit=1./target_misfit_norma1()
-    except ArithmeticError:
-        NORMA_misfit=1.
-        
     return
 
 
@@ -272,10 +298,10 @@ def generate_circuitFile_by_values( Xi_values):
         # * Цепь 1
         if rc_values[0]<BIG_R: # цепь R1 присутствует
             if rc_values[2]>= BIG_R: # C1 присутствует 
-                newF.write('R1 _net1 Input {:e}\n'.format(rc_values[0]))
+                newF.write('R1 _net1 input {:e}\n'.format(rc_values[0]))
                 newF.write('C1 _net0 _net1 {:e}\n'.format(rc_values[1]))
             else: # С1 нет
-                newF.write('R1 _net0 Input {:e}\n'.format(rc_values[0]))
+                newF.write('R1 _net0 input {:e}\n'.format(rc_values[0]))
             
             if rc_values[3]>= BIG_R: # D1 присутствует
                 newF.write('D1 _net0 0 DMOD_D1 AREA=1.0 Temp=26.85\n')
@@ -285,18 +311,18 @@ def generate_circuitFile_by_values( Xi_values):
         # * Цепь 2
         if rc_values[4]<BIG_R:
             if rc_values[6]>= BIG_R: # C2 присутствует
-                newF.write('R2 _net4 Input {:e}\n'.format(rc_values[4]))
+                newF.write('R2 _net4 input {:e}\n'.format(rc_values[4]))
                 newF.write('C2 0 _net4 {:e}\n'.format(rc_values[5]))
             else: # вместо С2 перемычка, R2 сразу на землю
-                newF.write('R2 0 Input {:e}\n'.format(rc_values[4]))
+                newF.write('R2 0 input {:e}\n'.format(rc_values[4]))
         
         # * Цепь 3
         if rc_values[7]<BIG_R:
             if rc_values[9]>=BIG_R: # C3 присутствует
-                newF.write('R3 _net3 Input {:e}\n'.format(rc_values[7]))
+                newF.write('R3 _net3 input {:e}\n'.format(rc_values[7]))
                 newF.write('C3 _net2 _net3 {:e}\n'.format(rc_values[8]))
             else: # С3 нет
-                newF.write('R3 _net2 Input {:e}\n'.format(rc_values[7]))
+                newF.write('R3 _net2 input {:e}\n'.format(rc_values[7]))
                 
             if rc_values[10]>=BIG_R: # D3 присутствует
                 newF.write('D3 0 _net2 DMOD_D1 AREA=1.0 Temp=26.85\n')
@@ -314,14 +340,19 @@ input_data = None
 # промоделировать файл схемы
 def process_circuitFile():
     global analysis,input_data
-    #del(analysis) # необходимо
     
     if input_data is None:
         input_data = spice.Init_Data(INIT_F, INIT_V, INIT_Rcs,INIT_SNR )
         
-    circuit = spice.LoadFile(circuit_SessionFileName)
-    analysis = spice.CreateCVC1(circuit, input_data, MAX_NUM_POINTS, "input", INIT_CYCLE)   
-    
+    try:    
+        circuit = spice.LoadFile(circuit_SessionFileName)
+    except:
+        print('spice.LoadFile() failed')
+        
+    try:
+        analysis = spice.CreateCVC1(circuit, input_data, MAX_NUM_POINTS, "input", INIT_CYCLE)   
+    except:
+        print('spice.CreateCVC1() failed')
         
 # последний анализ перевести в форму, пригодную для сравнения в libivcmp
 iv_curve = None
@@ -384,7 +415,10 @@ def C_to_R(c):
 
 def R_to_C(r):
     c = 1/(2.*np.pi*INIT_F*r)
+    if math.isinf(c):
+        c = 1e20
     return c
+
 
 def analysis_misfit_ivcmp():
     global min_ivc
@@ -395,67 +429,6 @@ def analysis_misfit_ivcmp():
     #print(res, min_ivc)
     return res
 
-# вычислить нормирующую величину для анализа.
-def target_misfit_norma1():    
-    curr_t = target_VCurrent
-    volt_t = target_input_dummy
-    
-    if MISFIT_METHOD == 'power':
-        r = (curr_t*volt_t)
-        return math.fsum(r)
-    
-    if MISFIT_METHOD == 'power_fft':
-        r = scf.rfft(curr_t*volt_t)       
-        return math.fsum(r)
-    
-    if MISFIT_METHOD == 'sko':
-        r = (curr_t)        
-        r2 = np.abs(r)
-        return math.fsum(r2)
-    
-    if MISFIT_METHOD == 'sko_fft':
-        r = (curr_t)
-        r2 = scf.rfft(np.abs(r))
-        return math.fsum(r2)
-    
-    if MISFIT_METHOD == 'sko_Z2':
-        r = np.copy(curr_t)  
-        for i in range(len(volt_t)):
-            if np.abs(volt_t[i])>DIODE_VOLTAGE:
-                r[i] = 0. 
-        r2 = np.abs(r)
-        return NORMA_misfit*math.fsum(r2)
-    
-    # мера несовпадения, учитывающая только напряжения больше открытия диода -
-    # положительная полуволна ВАХ
-    if MISFIT_METHOD == 'sko_Z1':
-        r = np.copy(curr_t)  
-        for i in range(len(volt_t)):
-            if volt_t[i]<DIODE_VOLTAGE+SMALL_VOLTAGE:
-                r[i] = 0. 
-        r2 = np.abs(r)
-        return NORMA_misfit*math.fsum(r2)
-    
-    # мера несовпадения, учитывающая только напряжения меньше диода D3-
-    # отрицательная полуволна ВАХ
-    if MISFIT_METHOD == 'sko_Z3':
-        r = np.copy(curr_t)  
-        for i in range(len(volt_t)):
-            if volt_t[i]>-1.*(DIODE_VOLTAGE+SMALL_VOLTAGE):
-                r[i] = 0. 
-                
-        r2 = np.abs(r)
-        return NORMA_misfit*math.fsum(r2)
-    
-    if MISFIT_METHOD == 'libivcmp':                
-        return 1. # для libivcmp норма не поддерживается
-    
-    s = "unknown MISFIT_METHOD = '"+str(MISFIT_METHOD)+"'"
-    raise RuntimeError(s)
-
-
-NORMA_misfit = 1.
-
 # вычислить несовпадение последнего анализа и целевой функции.
 def analysis_misfit():    
     curr_t = target_VCurrent
@@ -463,60 +436,54 @@ def analysis_misfit():
     volt_t = target_input_dummy
     volt_a = analysis.input_dummy
     
-    if MISFIT_METHOD == 'power':
-        r = (curr_t*volt_t-curr_a*volt_a)
-        return NORMA_misfit*math.fsum(r)
+    # метод сравнения кривых по несовпадению кривых мощности.
+    # учитывает возможное несогласование фаз сигналов
+    if MISFIT_METHOD == 'type_ps':
+        fullV_target = np.zeros_like(target_input_dummy)
+        fullV_A = np.zeros_like(target_input_dummy)
+        signal_target = np.zeros_like(target_input_dummy)
+        signal_A = np.zeros_like(target_input_dummy)
+        signal_cmp = np.zeros_like(target_input_dummy)
+        
+        for i in range(len(fullV_target)):
+            # полные напряжения возбуждения
+            fullV_target[i] = target_input_dummy[i]+INIT_Rcs*target_VCurrent[i]
+            fullV_A[i] = analysis.input_dummy[i]+INIT_Rcs*analysis.VCurrent[i]
+            # мощности, ушедшие в нагрузку
+            #signal_target[i] = fullV_target[i]*target_VCurrent[i]
+            #signal_A[i] = fullV_A[i]*analysis.VCurrent[i]
+            signal_target[i] = target_VCurrent[i]
+            signal_A[i] = analysis.VCurrent[i]
+            
+        # выравнивание фаз по максимуму сигнала
+        index_target = np.argmax(fullV_target)
+        index_A = np.argmax(fullV_A)
+        # фазовый сдвиг в отсчетах
+        phase_shift =index_A-index_target+len(signal_target)
+        
+        for i in range(len(signal_target)):
+            i_A = (i+phase_shift)%len(signal_target)
+            # разница мгновенной мощности
+            #signal_cmp[i] = np.abs(signal_target[i]-signal_A[i_A])
+            signal_cmp[i] = (signal_target[i]-signal_A[i_A])**2
+         
+        return math.fsum(signal_cmp)
+    
     
     if MISFIT_METHOD == 'power_fft':
         r = scf.rfft(curr_t*volt_t-curr_a*volt_a)       
-        return NORMA_misfit*math.fsum(r)
+        return math.fsum(r)
     
     if MISFIT_METHOD == 'sko':
         r = (curr_t-curr_a)        
         r2 = np.abs(r)
-        return NORMA_misfit*math.fsum(r2)
+        return math.fsum(r2)
     
-    if MISFIT_METHOD == 'sko_fft':
-        r = (curr_t-curr_a)
-        r2 = np.abs(r)
-        return NORMA_misfit*math.fsum(scf.rfft(r2))
     
     if MISFIT_METHOD == 'libivcmp':                
         step_IVCurve = analysis_to_IVCurve()
         res = libivcmp.CompareIvc(target_IVCurve, step_IVCurve, MAX_NUM_POINTS)
         return res
-    
-    # мера несовпадения, учитывающая только напряжения меньше открытия диода -
-    # центральная часть ВАХ
-    if MISFIT_METHOD == 'sko_Z2':
-        r = (curr_t-curr_a)  
-        for i in range(len(volt_t)):
-            if np.abs(volt_t[i])>DIODE_VOLTAGE:
-                r[i] = 0. 
-        r2 = np.abs(r)
-        return NORMA_misfit*math.fsum(r2)
-    
-    # мера несовпадения, учитывающая только напряжения больше открытия диода -
-    # положительная полуволна ВАХ
-    if MISFIT_METHOD == 'sko_Z1':
-        r = (curr_t-curr_a)  
-        for i in range(len(volt_t)):
-            if volt_t[i]<DIODE_VOLTAGE+SMALL_VOLTAGE:
-                r[i] = 0. 
-        r2 = np.abs(r)
-        return NORMA_misfit*math.fsum(r2)
-    
-    # мера несовпадения, учитывающая только напряжения меньше диода D3-
-    # отрицательная полуволна ВАХ
-    if MISFIT_METHOD == 'sko_Z3':
-        r = (curr_t-curr_a)  
-        for i in range(len(volt_t)):
-            if volt_t[i]>-1.*(DIODE_VOLTAGE+SMALL_VOLTAGE):
-                r[i] = 0. 
-                
-        r2 = np.abs(r)
-        return NORMA_misfit*math.fsum(r2)
-    
     
     ###
     s = "unknown MISFIT_METHOD = '"+str(MISFIT_METHOD)+"'"
@@ -648,9 +615,9 @@ CODE2_COUNT = 4
 # swcode - числовой код,от 0 до 255 включительно, задает положения переключателей
 # code2 - дополнительный код, для каждого варианта swcode передавать code2=0,1,2, ...
 # до тех пор, пока функция не вернет False
-def Session_init_by_approximation(ses,swcode,code2):       
+def Session_init_by_approximation(ses,swcode,code2,title=''):       
     sch = ses['start_sch']           
-    res = Z123_approximation(sch,swcode,code2)
+    res = Z123_approximation(sch,swcode,code2,title)
     Session_set_switchers(ses,swcode)
     Session_run1(ses)
     
@@ -660,141 +627,197 @@ def Session_init_by_approximation(ses,swcode,code2):
 #############################################################################
 ## ФУНКЦИИ НУЛЕВОГО ПОДБОРА (ПРИСТРЕЛКА) ####################################
 #############################################################################
-# сигнал в пределах, где диоды D1 и D3 закрыты
-def minimize_subroutine_Z2(X):
-    Ampl = X[0] # амплитуда
-    Phase = X[1] # фаза
-    f1 = np.pi*(1+1./MAX_NUM_POINTS)
-    f2 = np.pi*(3+1./MAX_NUM_POINTS)
-    t = np.linspace(f1,f2,MAX_NUM_POINTS) # сигнал как в MySpice
-    sig2 = Ampl*np.sin(t+Phase) # ток с фазовым сдвигом
-    V = INIT_V*np.sin(t) # напряжение без фазового сдвига
-    # исключаем точки с напряжением больше напряжения диода, т.е. берем только
-    # центральную часть ВАХ
-    for k in range(MAX_NUM_POINTS):
-        if np.abs(V[k])>DIODE_VOLTAGE:
-            sig2[k]=target_VCurrent[k]
-    # сравнение
-    Res = math.fsum(np.abs(sig2-target_VCurrent))
-    return Res
-    
-####################
 
-# ток через диод D1, аргументы
-# X[0] - сопротивление [Ом], X[1] - реактивное сопротивление емкости [Ом],
-# args[0] - учитывать ли цепь Z2, 
-# args[1] - амплитуда args[2] - сдвиг фазы сигнала в цепи Z2 
-def minimize_subroutine_Z1(X,*args):
-    R = np.abs(X[0]) # сопротивление
-    C = R_to_C(np.abs(X[1])) # емкость
-    #print(X)
-    Ampl_Z2 = 0.
-    Phase_Z2 = 0.
-    
-    if args[0]: # учитываем вклад цепи Z2
-        Ampl_Z2 = args[1]
-        Phase_Z2 = args[2]
-         
-    f1 = np.pi*(1+1./MAX_NUM_POINTS)
-    f2 = np.pi*(3+1./MAX_NUM_POINTS)
-    t = np.linspace(f1,f2,MAX_NUM_POINTS) 
-    
-    sig_Z2 = Ampl_Z2*np.sin(t+Phase_Z2) # ток через цепь Z2
-    V = INIT_V*np.sin(t) # напряжение в цепи
-    
-    sig1 = np.zeros_like(V) # ток через цепь
-    
-    
-    dt = MAX_NUM_POINTS/INIT_F # квант времени между точками сигнала
-    Rcap = dt/C # эквивалентное сопротивление диода
-    
-    Q = 0. # заряд в начале нулевой
-    for c in range(0,INIT_CYCLE):
-        for i in range(len(V)):
-            Vcap = Q/C # напряжение на диоде
-            Vpn = V[i]-Vcap-DIODE_VOLTAGE
-            if Vpn<=0.:
-                continue
-            Ipn = Vpn/(R+Rcap)
-            Q += Ipn*dt
-            sig1[i] = Ipn
-    
-    # разность вкладов сигналов ВАХ от положительной полуволны и центральной части
-    sig1 = sig1-sig_Z2
-          
-    # исключаем точки с напряжением меньше открытия диода D1, т.е. берем только
-    # положительную часть ВАХ за диодом
-    for k in range(MAX_NUM_POINTS):
-        if V[k]<DIODE_VOLTAGE:
-            sig1[k]=target_VCurrent[k]
-            
-    # сравнение
-    Res = math.fsum(np.abs(sig1-target_VCurrent))
-    #print('res='+str(Res))
-    return Res
+# полное напряжение цепи - до резистора Rcs.
+target_fullVoltage = None
+# ток цепи, с коррекцией смещения нуля
+corrected_VCurrent = None
 
+# ток через нашу упрощенную цепь
+def I_from_VR1R2R3(V,R1,R2,R3):
+    I = V/(INIT_Rcs+R2)
+    R1 = np.abs(R1)
+    R2 = np.abs(R2)
+    R3 = np.abs(R3)
+    V2 = R2*I
 
-# ток через диод D3, аргументы
-# X[0] - сопротивление [Ом], X[1] - реактивное сопротивление емкости [Ом],
-# args[0] - учитывать ли цепь Z2, 
-# args[1] - амплитуда args[2] - сдвиг фазы сигнала в цепи Z2 
-def minimize_subroutine_Z3(X,*args):
-    R = np.abs(X[0]) # сопротивление
-    C = R_to_C(np.abs(X[1])) # емкость
+    # диод VD1 открыт
+    if V2>=DIODE_VOLTAGE:
+        up_part = V*(R1+R2)-R2*DIODE_VOLTAGE
+        down_part = R1*R2+R1*INIT_Rcs+R2*INIT_Rcs
+        Id = up_part/down_part
+        return Id
     
-    Ampl_Z2 = 0.
-    Phase_Z2 = 0.
+    # диод VD3 открыт
+    if V2 <=-DIODE_VOLTAGE:
+        up_part = V*(R3+R2)+R2*DIODE_VOLTAGE
+        down_part = R3*R2+R3*INIT_Rcs+R2*INIT_Rcs
+        Id = up_part/down_part
+        return Id
     
-    if args[0]: # учитываем вклад цепи Z2
-        Ampl_Z2 = args[1]
-        Phase_Z2 = args[2]
-         
-    f1 = np.pi*(1+1./MAX_NUM_POINTS)
-    f2 = np.pi*(3+1./MAX_NUM_POINTS)
-    t = np.linspace(f1,f2,MAX_NUM_POINTS) 
-    
-    sig_Z2 = Ampl_Z2*np.sin(t+Phase_Z2) # ток через цепь Z2
-    V = INIT_V*np.sin(t) # напряжение в цепи
-    
-    sig1 = np.zeros_like(V) # ток через цепь
-    
-    
-    dt = MAX_NUM_POINTS/INIT_F # квант времени между точками сигнала
-    Rcap = dt/C # динамическое сопротивление диода
-    Q = 0. # заряд в начале нулевой
-    
-    for c in range(INIT_CYCLE):
-        for i in range(len(V)):
-            Vcap = Q/C # напряжение на диоде
-            Vpn = V[i]-Vcap+DIODE_VOLTAGE
-            if Vpn>0.:
-                continue
-            Ipn = Vpn/(R+Rcap)
-            Q += Ipn*dt
-            sig1[i] = Ipn
+    # случай, когда диоды VD1 и VD3 закрыты - просто закон ома
+    return I
+
+# сопротивление из известных значений
+def R1_from_R2VI(R2,V,I):
+    I2 = V/(INIT_Rcs+R2)
+    #диод открыт
+    if(I2*R2)<(DIODE_VOLTAGE-SMALL_VOLTAGE):
+        print('R1_from_R2VI() Error: DIODE VD1 CLOSED!!')
+        raise RuntimeError("R1_from_R2VI() Error: DIODE VD1 CLOSED!!") from None
+
+    up_part = R2*(V-I*INIT_Rcs-DIODE_VOLTAGE)
+    #print('up_part='+str(up_part))
+    down_part = I*(R2+INIT_Rcs)-V
+    #print('down_part='+str(down_part))
+    return up_part/down_part
+
+# сопротивление из известных значений
+def R3_from_R2VI(R2,V,I):
+    I2 = V/(INIT_Rcs+R2)
+    #диод открыт
+    if(I2*R2)>-(DIODE_VOLTAGE-SMALL_VOLTAGE):
+        raise RuntimeError("R3_from_R2VI() Error: DIODE VD3 CLOSED!!") from None
+
+    up_part = R2*(V-I*INIT_Rcs+DIODE_VOLTAGE)
+    down_part = I*(R2+INIT_Rcs)-V
+    return up_part/down_part
         
-    # разность вкладов сигналов ВАХ от отрицательной полуволны и центральной части
-    sig1 = sig1-sig_Z2
-      
-    # исключаем точки с напряжением меньше открытия диода D1, т.е. берем только
-    # положительную часть ВАХ за диодом
-    for k in range(MAX_NUM_POINTS):
-        if V[k]>-1.*DIODE_VOLTAGE:
-            sig1[k]=target_VCurrent[k]
-            
-    # сравнение
-    Res = math.fsum(np.abs(sig1-target_VCurrent))
-    return Res
- 
-       
+    
+# измерить непосредственно r2 
+def measure_r2():
+    v_r2 = target_input_dummy
+    
+    r_summ = 0.
+    r_count = 0
+    
+    for i in range(len(v_r2)):
+        if(np.abs(v_r2[i])>SMALL_VOLTAGE) and (np.abs(v_r2[i])<DIODE_VOLTAGE):
+            r_i = V_div_I(v_r2[i],corrected_VCurrent[i])
+            if(r_i>=HUGE_R):
+                continue
+            r_summ += np.abs(r_i)
+            r_count +=1
+            #print('r2='+str(r_i))
+    try:
+        R = r_summ/r_count
+    except:
+        R = HUGE_R    
+    return R
+
+# измерить непосредственно r1
+def measure_r1_by_R2(R2):  
+    i = np.argmax(target_fullVoltage)
+    try:
+        r = R1_from_R2VI(R2,target_fullVoltage[i],corrected_VCurrent[i])
+    except:
+        r = NULL_R
+        
+    #print('r1='+str(r))
+    return r
+    
+
+# измерить непосредственно r3
+def measure_r3_by_R2(R2):     
+    i = np.argmin(target_fullVoltage)
+    try:
+        r = R3_from_R2VI(R2,target_fullVoltage[i],corrected_VCurrent[i])
+    except:
+        r = NULL_R
+        
+    #print('r3='+str(r))
+    return r
+    
+def get_r_high():
+    i = np.argmax(target_fullVoltage)
+    r = V_div_I(target_fullVoltage[i],corrected_VCurrent[i]) 
+    return r
+
+def get_r_low():
+    i = np.argmin(target_fullVoltage)
+    r = V_div_I(target_fullVoltage[i],corrected_VCurrent[i]) 
+    return r
+    
+def get_r_hight_sub_diode():
+    i = np.argmax(target_fullVoltage)
+    r = V_div_I(target_fullVoltage[i]-DIODE_VOLTAGE,corrected_VCurrent[i]) 
+    return r
+
+def get_r_low_sub_diode():
+    i = np.argmin(target_fullVoltage)
+    r = V_div_I(target_fullVoltage[i]+DIODE_VOLTAGE,corrected_VCurrent[i]) 
+    return r
+
+
+# при вычислений запоминает лучший результат по совпадению
+# кривых.
+min_r123_misfit = None
+min_r123_x = None
+
+def min_r123_subroutine(x):
+    global min_r123_misfit,min_r123_x
+    
+    r1 = x[0]
+    r2 = x[1]
+    r3 = x[2]
+    
+    E_r123 = np.zeros_like(target_fullVoltage)
+    
+    for i in range(len(E_r123)):
+        I = I_from_VR1R2R3(target_fullVoltage[i],r1,r2,r3)
+        #E_r123[i] = np.abs(I-corrected_VCurrent[i])
+        E_r123[i] = (I-corrected_VCurrent[i])**2
+        
+    Result = math.fsum(E_r123)
+    if (min_r123_misfit is None)or(Result<min_r123_misfit):
+        min_r123_x = [r1,r2,r3]
+        min_r123_misfit = Result
+        
+    return Result
+
+# измерить смещение нуля в пределах напряжений, где диоды закрыты
+def measure_zero_drift():
+    z_value = 0.
+    z_count = 0
+    for i in range(len(target_VCurrent)):
+        if(np.abs(target_input_dummy[i])<(DIODE_VOLTAGE)):
+            z_value += target_VCurrent[i]
+            z_count += 1
+    try:
+        z_drift = z_value/z_count
+    except:
+        z_drift = 0.
+    print('z_drift='+str(z_drift))
+    return z_drift
+    
+# проверить границы номиналов емкости, 
+# установить граничные значения, если выходит за пределы
+def C_to_norm(C):
+    if C<NONE_C:
+        return NONE_C
+    if C>HUGE_C:
+        return HUGE_C
+    return C
+
+def phase_to_norm(phase):
+    pass
+# инициализация, исходя из того Rcs может быть
+# десятки килоОм
 Z123_sch = None
 
-# инициализация схемы
-def Z123_approximation(sch,swcode,code2):
-    global Z123_sch
+def Z123_approximation(sch,swcode,code2,title=''):
+    global Z123_sch,target_fullVoltage,min_r123_misfit,corrected_VCurrent
     
-    if Z123_sch is None:
+    if Z123_sch is None:   
         Z123_sch = Sch_init()
+        zero_drift = measure_zero_drift()
+        
+        target_fullVoltage = np.copy(target_VCurrent)
+        corrected_VCurrent = np.copy(target_VCurrent)
+        for i in range(len(target_input_dummy)):  
+            target_fullVoltage[i] = target_input_dummy[i]+INIT_Rcs*target_VCurrent[i]
+            #corrected_VCurrent[i] = target_VCurrent[i]-zero_drift
+            corrected_VCurrent[i] = target_VCurrent[i]
     else:
         # копирование
         sch['R1'] = Z123_sch['R1']
@@ -805,68 +828,114 @@ def Z123_approximation(sch,swcode,code2):
         sch['C3'] = Z123_sch['C3']
         
         return False # больше не вызывать
-        # !todo - раньше тут была реализация альтернативная инициализация,
-        # сделать рефакторинг,  
+    
+    ########################################################
         
-    angle1=30.*np.pi/180.
-    angle3=30.*np.pi/180.
+    r2 = measure_r2()
+    r1 = measure_r1_by_R2(r2)
+    r3 = measure_r3_by_R2(r2)
     
-    # начальные условия по цепи Z2 
-    A1 = np.abs(np.max(target_VCurrent))
-    A2 = np.abs(np.min(target_VCurrent))
-    A = np.min([A1,A2])
-    X = [A,0.]
-    r = spo.minimize(minimize_subroutine_Z2,X)
-    Ampl_Z2 = r.x[0]
-    Phase_Z2 = r.x[1]
     
-    Z = V_div_I(INIT_V,Ampl_Z2)
-    R = Z*np.cos(Phase_Z2)
-    C = R_to_C(Z*np.sin(Phase_Z2))
+    # обнуляем пристрелку
+    min_r123_misfit = None
+    # варианты значений сопротивлений схем
+    # основной вариант аналитического приближения, срабатывает почти всегда
+    min_r123_subroutine([r1,r2,r3]) 
+    # разные варианты с меньшей абсолютной  погрешностью
+    # для аналитического приближения
+    min_r123_subroutine([r1,HUGE_R,r3])
+    min_r123_subroutine([r1,HUGE_R,measure_r3_by_R2(HUGE_R)])
+    min_r123_subroutine([measure_r1_by_R2(HUGE_R),HUGE_R,r3])
+    min_r123_subroutine([measure_r1_by_R2(HUGE_R),HUGE_R,measure_r3_by_R2(HUGE_R)])
+    min_r123_subroutine([measure_r1_by_R2(HUGE_R),HUGE_R,r3])
+    min_r123_subroutine([measure_r1_by_R2(HUGE_R),HUGE_R,HUGE_R])
+    min_r123_subroutine([HUGE_R,HUGE_R,measure_r3_by_R2(HUGE_R)])
+    # разные варианты с меньшей абсолютной  погрешностью
+    # для приближения диода с идеальной ВАХ
+    r1_0 = get_r_high()
+    r1_d = get_r_hight_sub_diode()
+    r3_0 = get_r_low()
+    r3_d = get_r_low_sub_diode()
+    
+    min_r123_subroutine([r1_d,HUGE_R,r3_d])
+    min_r123_subroutine([r1_d,r3_0,HUGE_R])
+    min_r123_subroutine([HUGE_R,r1_0,r3_d])
+    min_r123_subroutine([HUGE_R,r3_0,HUGE_R])
+    min_r123_subroutine([HUGE_R,r1_0,HUGE_R])
+    min_r123_subroutine([NULL_R,r2,NULL_R])
+    min_r123_subroutine([NULL_R,r2,r3])
+    min_r123_subroutine([r1,r2,NULL_R])
+    # маловероятно, но пусть будет
+    min_r123_subroutine([r1,NULL_R,r3]) 
+    
+    
+    r1 = np.abs(min_r123_x[0])
+    r2 = np.abs(min_r123_x[1])
+    r3 = np.abs(min_r123_x[2])
+    
+    Rc1 = 1./(1./r1+1./r2)
+    Rc2 = 1./(1./r1+1./r2+1./r3)
+    Rc3 = 1./(1./r2+1./r3)
+    
+    
+    phase_1 = 360*(np.argmax(target_fullVoltage)-np.argmax(target_VCurrent))/MAX_NUM_POINTS
+    phase_3 = 360*(np.argmin(target_fullVoltage)-np.argmin(target_VCurrent))/MAX_NUM_POINTS
+    print('phase_1='+str(phase_1))
+    print('phase_3='+str(phase_3))
+    phase_1 = np.abs(phase_1)%90
+    phase_3 = np.abs(phase_3)%90
+    
+    if phase_1 < 5: phase_1 = 5
+    if phase_3 < 5: phase_3 = 5 
+    if phase_1 > 85 : phase_1 = 85
+    if phase_3 > 85: phase_3 = 85
+    
+    phase_2 = (phase_1+phase_3)/2.
+    print('phase_1*='+str(phase_1))
+    print('phase_2*='+str(phase_2))
+    print('phase_3*='+str(phase_3))
+    
 
-    # print('R2='+str(R))
-    # print('C2='+str(C))
-    Z123_sch['R2'] = R
-    Z123_sch['C2'] = C
+    с1 = R_to_C(Rc1*np.cos(phase_1*np.pi/180))
+    с1 = C_to_norm(с1)
+    с2 = R_to_C(Rc2*np.cos(phase_2*np.pi/180))
+    с2 = C_to_norm(с2)
+    с3 = R_to_C(Rc3*np.cos(phase_3*np.pi/180))
+    с3 = C_to_norm(с3)
     
-    f1 = np.pi*(1+1./MAX_NUM_POINTS)
-    f2 = np.pi*(3+1./MAX_NUM_POINTS)
-    t = np.linspace(f1,f2,MAX_NUM_POINTS) 
     
-    sig_Z2 = Ampl_Z2*np.sin(t+Phase_Z2) # ток через цепь Z2
+    Z123_sch['R1'] = r1
+    Z123_sch['C1'] = с1
+    Z123_sch['R2'] = r2
+    Z123_sch['C2'] = с2
+    Z123_sch['R3'] = r3
+    Z123_sch['C3'] = с3
     
-    # начальные условия по цепи Z1
-    Imax = np.max(target_VCurrent-sig_Z2)
-    Zmax = V_div_I(INIT_V-DIODE_VOLTAGE,Imax)
+    str_0 ='\nr1_o={:2.1e}, r2_o={:2.1e}, r3_o={:2.1e}'.format(r1,r2,r3) 
+    plt.title('Пристрелка '+title+str_0)
+    plt.plot(target_input_dummy,target_VCurrent,c='red')
     
-    R = Zmax*np.cos(angle1)
-    Xc = Zmax*np.sin(angle1)
+    print('r1_o = '+str(r1))
+    print('r2_o = '+str(r2))
+    print('r3_o = '+str(r3))
+    print('с1_o = '+str(с1))
+    print('с2_o = '+str(с2))
+    print('с3_o = '+str(с3))
     
-    X = [R,Xc]
-    r = spo.minimize(minimize_subroutine_Z1,X,args=(True,Ampl_Z2,Phase_Z2))
-    R = r.x[0]
-    C = R_to_C(r.x[1])
-    # print('R1='+str(R))
-    # print('C1='+str(C))
-    Z123_sch['R1'] = R
-    Z123_sch['C1'] = C
+    curr_r123 = np.zeros_like(target_fullVoltage)
+    for i in range(len(curr_r123)):
+        curr_r123[i] = I_from_VR1R2R3(target_fullVoltage[i],r1,r2,r3)
     
-    # начальные условия по цепи Z3
-    Imin = np.min(target_VCurrent-sig_Z2)
-    Zmin = V_div_I(INIT_V-DIODE_VOLTAGE,Imin)
-    R = Zmin*np.cos(angle3)
-    Xc = Zmin*np.sin(angle3)
-    # print('R0='+str(R))
-    # print('C0='+str(C))
+    plt.plot(target_input_dummy,curr_r123,c='blue') 
+    plt.legend(['реальные даные','Н.У. подбора'])
+    plt.show()
     
-    X = [R,Xc]
-    r = spo.minimize(minimize_subroutine_Z3,X,args=(True,Ampl_Z2,Phase_Z2))
-    R = r.x[0]
-    C = R_to_C(r.x[1])
-    # print('R3='+str(R))
-    # print('C3='+str(C)) 
-    Z123_sch['R3'] = R
-    Z123_sch['C3'] = C
+    # plt.plot(target_input_dummy)
+    # plt.show()
+    # plt.plot(target_VCurrent)
+    # plt.show()
+    
+    
     # именно такое копирование, ибо надо сохранить ссылку
     sch['R1'] = Z123_sch['R1']
     sch['C1'] = Z123_sch['C1']
@@ -875,8 +944,7 @@ def Z123_approximation(sch,swcode,code2):
     sch['R3'] = Z123_sch['R3']
     sch['C3'] = Z123_sch['C3']
     
-    return False 
-
+    return 
 
 #############################################################################
 #############################################################################
@@ -884,22 +952,29 @@ def Z123_approximation(sch,swcode,code2):
 
         
 def Sch_saveToFile(sch,fileName):
-    with open(fileName, 'w') as newF:
-        json.dump(sch,newF)
+    global circuit_SessionFileName
+    s = circuit_SessionFileName
+    circuit_SessionFileName = fileName
+    try:
+        Session_run1(sch)
+    except:
+        with open(fileName, 'w') as newF:
+            json.dump(sch,newF)
+        
+    print(sch['result_sch'])
+    circuit_SessionFileName = s
+    return
+
+   
     
     
 def init_target_by_Sch(sch):
-    global NORMA_misfit
     global Z123_sch
     Z123_sch = None
     
     generate_circuitFile_by_values(Sch_get_Xi(sch))
     init_target_by_circuitFile()  
-    
-    try:
-        NORMA_misfit=1./target_misfit_norma1()
-    except ArithmeticError:
-        NORMA_misfit=1.
+    return
             
             
 ############################################################################# 
@@ -936,7 +1011,12 @@ def Session_run_fitter(session):
     var_list = session['Xi_variable']
     set_circuit_nominals(Sch_get_Xi(sch))
     set_Xi_variable(var_list)
-    run_fitter()
+    
+    try:
+        run_fitter()
+    except:
+        print('NGSPICE EXCEPTION')
+        
     sch2 = Sch_init()
     Sch_load_from_Xi(sch2, Xi_result)
     session['result_sch'] = sch2
@@ -1043,7 +1123,7 @@ def Session_processAll(fileName='result.txt'):
         while next_code2:
             sch0 = Sch_init()
             ses = Session_create(sch0)
-            next_code2 = Session_init_by_approximation(ses,swcode,code2)
+            next_code2 = Session_init_by_approximation(ses,swcode,code2,fileName)
             code2 += 1
             ses_list += [ses]
             
@@ -1053,7 +1133,8 @@ def Session_processAll(fileName='result.txt'):
                 print(ses['start_sch'])           
                 analysis_plot('FITTER SUCCESS')
                 print('FITTER_SUCCESS!!\nmisfit = '+str(best_misfit))
-                Sch_saveToFile(ses['start_sch'], fileName)
+                #Sch_saveToFile(ses['start_sch'], fileName)       
+                Sch_saveToFile(best_ses, fileName)               
                 print('good case!!') 
                 return
             
@@ -1077,16 +1158,24 @@ def Session_processAll(fileName='result.txt'):
                 print(ses['result_sch'])           
                 analysis_plot('FITTER SUCCESS')
                 print('FITTER_SUCCESS!!\nmisfit = '+str(best_misfit))
-                Sch_saveToFile(ses['result_sch'], fileName)
+                #Sch_saveToFile(ses['result_sch'], fileName)
+                Sch_saveToFile(best_ses, fileName)                
                 return
     ## end_for
     
     # подбор завершился неудачно, выводим что есть
     print('FITTER routine unsuccessfull\nmisfit = '+str(best_ses['misfit']))   
-    Sch_saveToFile(best_ses['result_sch'], fileName)
+    #Sch_saveToFile(best_ses['result_sch'], fileName)
+    Sch_saveToFile(best_ses, fileName)    
     Session_run1(best_ses)
     analysis_plot('FITTER routine unsuccessfull')
 
+
+def open_board(path):
+    with open(path, "r") as dump_file:
+        ivc_real = json.load(dump_file)
+        return ivc_real
+    return None
 
 #############################################################################
     
@@ -1137,18 +1226,24 @@ def test5():
     Session_processAll('test5.txt')
     
     
-def test_data(csv_data,fileName='result.txt'):
+def test_data_jsn(jsn_data,N,fileName='result.txt'):
+    global Z123_sch 
+    gc.collect()
     print('\n')
-    print(csv_data)
-    init_target_from_csvFile(csv_data)
-    plt.plot(target_VCurrent)
-    plt.show()
-    plt.plot(target_input_dummy)
-    plt.show()
+    print(jsn_data)
+    init_target_from_jsnFile(jsn_data, N)
+    # plt.plot(target_VCurrent)
+    # plt.show()
+    # plt.plot(target_input_dummy)
+    # plt.show()
+    # Z123_sch = None
+    # sch = Sch_init()
+    # Z123_approximation(sch,0,0,fileName)
     Session_processAll(fileName)
 
 
 def test_circuit(circuitFile,resultFile = 'result.txt'):
+    gc.collect()
     print('\n')
     print(circuitFile)
     init_target_by_circuitFile(circuitFile)
@@ -1159,30 +1254,46 @@ def test_circuit(circuitFile,resultFile = 'result.txt'):
     # plt.plot(target_VCurrent)
     # plt.title('current')
     # plt.show()   
-    Session_processAll(resultFile)
- 
+    Session_processAll(resultFile)   
     
+    
+##############################################################
+
 def main(): 
     #libivcmp.set_MAX_NUM_POINTS(100)
-    test2()
-    test3()
-    test4()
-    test5()
-    # test_data('test_nores.csv')
-    # test_data('test_rc.csv')
-    # test_data('test_rcd.csv')
-    # test_data('test_rcd_no.csv')
-    # test_data('test_rcd_rcd.csv')
-    # test_data('test_rd_ii_c.csv') 
-    # test_circuit('NoRes.cir')
-    test_circuit('R-C.cir')
-    test_circuit('R-C-D.cir')
-    test_circuit('R-C-D_No.cir')
-    test_circuit('R-D_ii_C.cir')
-    test_circuit('R1C1D1_ii_R2C2D2.cir')
+    # test2()
+    # test3()
+    # test4()
+    # test5()
+
+    # Обработка тестовых csv файлов
+    #test_data('R_C.csv','R_C.txt')
+    #test_data_csv('R_D-C.csv','R_D-C.txt')
+    # test_data_jsn("1hz.json",8,'100hz_0.txt')
     
     
+    # for k in range(10):
+    #     test_data_jsn("1hz.json",k,'100hz_{}.txt'.format(k))
+    #     test_data_jsn("100hz.json",k,'100hz_{}.txt'.format(k))
+    #     test_data_jsn("100khz.json",k,'100hz_{}.txt'.format(k))
     
+    # return 
+    
+    # k=9
+    # test_data_jsn("100khz.json",k,'100khz_{}.txt'.format(k))
+        
+    for k in range(10):
+        test_data_jsn("1hz.json",k,'1hz_{}.txt'.format(k))
+    
+
+    for k in range(10):
+        test_data_jsn("100hz.json",k,'100hz_{}.txt'.format(k))
+        
+    for k in range(10):
+        test_data_jsn("100khz.json",k,'100khz_{}.txt'.format(k))
+    
+    
+
 if __name__=='__main__':
     main()
       
