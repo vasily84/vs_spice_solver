@@ -33,6 +33,7 @@ import gc
 # метод сравнения кривых тока и напряжения
 # может быть : 'libivcmp','type_ps'
 MISFIT_METHOD = 'libivcmp'
+#MISFIT_METHOD = 'type_angle'
 #MISFIT_METHOD = 'type_ps'
 
 
@@ -45,8 +46,8 @@ INIT_V = 5
 INIT_Rcs = 1e2
 
 # SIGNAL/NOISE ratio
-INIT_SNR = 120.0
-#INIT_SNR = 35.0
+#INIT_SNR = 120.0
+INIT_SNR = 35.0
 
 # число циклов колебаний напряжения в записи
 INIT_CYCLE = 2
@@ -75,6 +76,10 @@ HUGE_C = 1e-3 # 1000 мкФ
 # пока функция сравнения не вернет значение CompareIvc()<=IVCMP_TOLERANCE     
 #IVCMP_TOLERANCE = 5e-3
 IVCMP_TOLERANCE = 0.
+
+# в схему добавляются характеристики щупа? Подробности см. generate_circuitFile_by_values()
+#PROBE_CIRCUIT = True
+PROBE_CIRCUIT = False
 
 
 # погрешность подбора номиналов в процентах. Номиналы емкостей считаются по 
@@ -329,6 +334,12 @@ def generate_circuitFile_by_values( Xi_values):
             else: # вместо D3 перемычка
                 newF.write('R_D3 0 _net2 {:e}\n'.format(rc_values[10]))
          
+        # часть цепи, имитирующая входные характеристики осциллографа
+        if PROBE_CIRCUIT:
+            newF.write('* probe circuit\n')
+            newF.write('R100 0 input 1e6\n')
+            newF.write('C100 0 input 1e-12\n')
+            
         # есть диоды, добавляем модель
         if (rc_values[10]>=BIG_R)or(rc_values[3]>= BIG_R):    
             newF.write('.MODEL DMOD_D1 D (Is=2.22e-10 N=1.65 Cj0=4e-12 M=0.333 Vj=0.7 Fc=0.5 Rs=0.0686 Tt=5.76e-09 Ikf=0 Kf=0 Af=1 Bv=75 Ibv=1e-06 Xti=3 Eg=1.11 Tcv=0 Trs=0 Ttt1=0 Ttt2=0 Tm1=0 Tm2=0 Tnom=26.85 )\n')
@@ -421,12 +432,12 @@ def R_to_C(r):
 
 
 def analysis_misfit_ivcmp():
+    #return analysis_misfit()
     global min_ivc
     step_IVCurve = analysis_to_IVCurve()
     res = libivcmp.CompareIvc(target_IVCurve, step_IVCurve, MAX_NUM_POINTS)   
     if min_ivc > res:
         min_ivc = res
-    #print(res, min_ivc)
     return res
 
 # вычислить несовпадение последнего анализа и целевой функции.
@@ -436,8 +447,8 @@ def analysis_misfit():
     volt_t = target_input_dummy
     volt_a = analysis.input_dummy
     
-    # метод сравнения кривых по несовпадению кривых мощности.
-    # учитывает возможное несогласование фаз сигналов
+    # метод сравнения кривых по несовпадению кривых тока.
+    # учитывает возможное несогласование фаз сигналов, возможный дрейф нуля
     if MISFIT_METHOD == 'type_ps':
         fullV_target = np.zeros_like(target_input_dummy)
         fullV_A = np.zeros_like(target_input_dummy)
@@ -445,15 +456,15 @@ def analysis_misfit():
         signal_A = np.zeros_like(target_input_dummy)
         signal_cmp = np.zeros_like(target_input_dummy)
         
+        target_drift = np.sum(target_VCurrent)/MAX_NUM_POINTS
+        A_drift = np.sum(analysis.VCurrent)/MAX_NUM_POINTS
         for i in range(len(fullV_target)):
             # полные напряжения возбуждения
             fullV_target[i] = target_input_dummy[i]+INIT_Rcs*target_VCurrent[i]
             fullV_A[i] = analysis.input_dummy[i]+INIT_Rcs*analysis.VCurrent[i]
-            # мощности, ушедшие в нагрузку
-            #signal_target[i] = fullV_target[i]*target_VCurrent[i]
-            #signal_A[i] = fullV_A[i]*analysis.VCurrent[i]
-            signal_target[i] = target_VCurrent[i]
-            signal_A[i] = analysis.VCurrent[i]
+            # токовые сигналы с коррекцией по сумме
+            signal_target[i] = target_VCurrent[i]-target_drift
+            signal_A[i] = analysis.VCurrent[i]-A_drift
             
         # выравнивание фаз по максимуму сигнала
         index_target = np.argmax(fullV_target)
@@ -464,10 +475,51 @@ def analysis_misfit():
         for i in range(len(signal_target)):
             i_A = (i+phase_shift)%len(signal_target)
             # разница мгновенной мощности
-            #signal_cmp[i] = np.abs(signal_target[i]-signal_A[i_A])
-            signal_cmp[i] = (signal_target[i]-signal_A[i_A])**2
+            signal_cmp[i] = np.abs(signal_target[i]-signal_A[i_A])
+            #signal_cmp[i] = (signal_target[i]-signal_A[i_A])**2
          
         return math.fsum(signal_cmp)
+    
+    # метод сравнения кривых по несовпадению токов в полярной метрике.
+    # учитывает возможное несогласование фаз сигналов, возможный дрейф нуля
+    if MISFIT_METHOD == 'type_angle':    
+        fullV_target = np.zeros_like(target_input_dummy)
+        fullV_A = np.zeros_like(target_input_dummy)
+        signal_target = np.zeros_like(target_input_dummy)
+        signal_A = np.zeros_like(target_input_dummy)
+        signal_cmp = np.zeros_like(target_input_dummy)
+        
+        target_drift = np.sum(target_VCurrent)/MAX_NUM_POINTS
+        A_drift = np.sum(analysis.VCurrent)/MAX_NUM_POINTS
+        for i in range(len(fullV_target)):
+            # полные напряжения возбуждения
+            fullV_target[i] = target_input_dummy[i]+INIT_Rcs*target_VCurrent[i]
+            fullV_A[i] = analysis.input_dummy[i]+INIT_Rcs*analysis.VCurrent[i]
+            # токовые сигналы с коррекцией по сумме
+            signal_target[i] = target_VCurrent[i]-target_drift
+            signal_A[i] = analysis.VCurrent[i]-A_drift
+            
+        # выравнивание фаз по максимуму сигнала
+        index_target = np.argmax(fullV_target)
+        R_target = np.amax(np.abs(fullV_target))
+        index_A = np.argmax(fullV_A)
+        R_A = np.amax(np.abs(fullV_A))
+        # фазовый сдвиг в отсчетах
+        phase_shift =index_A-index_target+len(signal_target)
+        
+        for i in range(len(signal_target)):
+            i_A = (i-phase_shift)%len(signal_target)
+            angle_target = np.arccos(fullV_target[i]/R_target)
+            angle_A = np.arccos(fullV_A[i_A]/R_A)
+            da = angle_target-angle_A
+            A = signal_A[i_A]
+            T = signal_target[i]
+            
+            #signal_cmp[i] = np.abs(A-T*np.cos(da))+np.abs(T-A*np.cos(da))
+            signal_cmp[i] = (A-T*np.cos(da))**2+(T-A*np.cos(da))**2
+            
+        return math.fsum(signal_cmp)
+    
     
     
     if MISFIT_METHOD == 'power_fft':
@@ -483,6 +535,10 @@ def analysis_misfit():
     if MISFIT_METHOD == 'libivcmp':                
         step_IVCurve = analysis_to_IVCurve()
         res = libivcmp.CompareIvc(target_IVCurve, step_IVCurve, MAX_NUM_POINTS)
+        if math.isnan(res):
+            # тут сохранение в файл
+            print("!!! libivcmp.CompareIvc() returned NAN !!!")
+            #return 1.
         return res
     
     ###
@@ -816,8 +872,8 @@ def Z123_approximation(sch,swcode,code2,title=''):
         corrected_VCurrent = np.copy(target_VCurrent)
         for i in range(len(target_input_dummy)):  
             target_fullVoltage[i] = target_input_dummy[i]+INIT_Rcs*target_VCurrent[i]
-            #corrected_VCurrent[i] = target_VCurrent[i]-zero_drift
-            corrected_VCurrent[i] = target_VCurrent[i]
+            corrected_VCurrent[i] = target_VCurrent[i]-zero_drift
+            #corrected_VCurrent[i] = target_VCurrent[i]
     else:
         # копирование
         sch['R1'] = Z123_sch['R1']
@@ -905,11 +961,11 @@ def Z123_approximation(sch,swcode,code2,title=''):
     
     
     Z123_sch['R1'] = r1
-    Z123_sch['C1'] = с1
+    Z123_sch['C1'] = с3 ## !!!
     Z123_sch['R2'] = r2
     Z123_sch['C2'] = с2
     Z123_sch['R3'] = r3
-    Z123_sch['C3'] = с3
+    Z123_sch['C3'] = с1 ## !!!
     
     str_0 ='\nr1_o={:2.1e}, r2_o={:2.1e}, r3_o={:2.1e}'.format(r1,r2,r3) 
     plt.title('Пристрелка '+title+str_0)
@@ -1279,18 +1335,18 @@ def main():
     
     # return 
     
-    # k=9
+    # k=5
     # test_data_jsn("100khz.json",k,'100khz_{}.txt'.format(k))
         
-    for k in range(10):
-        test_data_jsn("1hz.json",k,'1hz_{}.txt'.format(k))
+    # for k in range(10):
+    #     test_data_jsn("1hz.json",k,'1hz_{}.txt'.format(k))
     
 
     for k in range(10):
         test_data_jsn("100hz.json",k,'100hz_{}.txt'.format(k))
         
-    for k in range(10):
-        test_data_jsn("100khz.json",k,'100khz_{}.txt'.format(k))
+    # for k in range(10):
+    #     test_data_jsn("100khz.json",k,'100khz_{}.txt'.format(k))
     
     
 
